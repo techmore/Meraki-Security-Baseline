@@ -213,16 +213,39 @@ def build_org_report(org_dir: str, org_name: str) -> str:
     wireless_stats = (
         load_json(os.path.join(org_dir, "wireless_connection_stats.json")) or {}
     )
+    wireless_clients = load_json(os.path.join(org_dir, "wireless_clients.json")) or []
+    wireless_mesh = (
+        load_json(os.path.join(org_dir, "wireless_mesh_statuses.json")) or {}
+    )
+    wireless_rf = load_json(os.path.join(org_dir, "wireless_rf_profiles.json")) or {}
+    switch_port_configs = (
+        load_json(os.path.join(org_dir, "switch_port_configs.json")) or []
+    )
+    switch_port_statuses = (
+        load_json(os.path.join(org_dir, "switch_port_statuses.json")) or []
+    )
     networks = load_json(os.path.join(org_dir, "networks.json")) or []
 
     # Device availability analysis
     device_status_counts = {}
     device_type_counts = {}
+    device_details = []
     for device in devices_avail:
         status = device.get("status", "unknown")
         product_type = device.get("productType", "unknown")
         device_status_counts[status] = device_status_counts.get(status, 0) + 1
         device_type_counts[product_type] = device_type_counts.get(product_type, 0) + 1
+        device_details.append(
+            {
+                "name": device.get("name", "Unknown"),
+                "serial": device.get("serial", "Unknown"),
+                "productType": product_type,
+                "status": status,
+                "networkId": device.get("network", {}).get("id", "Unknown")
+                if device.get("network")
+                else "Unknown",
+            }
+        )
 
     # PoE analysis
     poe_ports = (
@@ -245,16 +268,64 @@ def build_org_report(org_dir: str, org_name: str) -> str:
         low_util_devices = [
             d for d in channel_util if float(d.get("utilizationTotal", 0)) < 30
         ]
+        # Sort by utilization for reporting
+        sorted_by_util = sorted(
+            channel_util,
+            key=lambda x: float(x.get("utilizationTotal", 0)),
+            reverse=True,
+        )
     else:
         high_util_devices = []
         moderate_util_devices = []
         low_util_devices = []
+        sorted_by_util = []
 
-    # Switch port analysis
-    switch_ports_data = []
-    if isinstance(lldp_cdp, dict):
-        # Process LLDP/CDP data for port insights
+    # Switch port analysis - errors, warnings, speed issues
+    switch_port_issues = []
+    if isinstance(switch_port_statuses, list):
+        for port in switch_port_statuses[:50]:  # Limit to first 50 for performance
+            if any(
+                [
+                    port.get("errors", 0) > 0,
+                    port.get("speed")
+                    in [10, 100],  # 10Mbps or 100Mbps (should be 1Gbps+)
+                    port.get("duplex") == "half",
+                    port.get("poeMode") == "off"
+                    and port.get("productType")
+                    == "switch",  # PoE off on switch ports that might need it
+                ]
+            ):
+                switch_port_issues.append(
+                    {
+                        "switch": port.get("switchSerial", "Unknown"),
+                        "port": port.get("portId", "Unknown"),
+                        "errors": port.get("errors", 0),
+                        "speed": port.get("speed", "Unknown"),
+                        "duplex": port.get("duplex", "Unknown"),
+                        "poeMode": port.get("poeMode", "Unknown"),
+                        "status": port.get("status", "Unknown"),
+                    }
+                )
+
+    # Wireless issues
+    wireless_issues = []
+    if isinstance(wireless_stats, dict):
+        # Check for high noise, low signal, high retries, etc.
         pass
+
+    # Configuration issues from switch port configs
+    config_issues = []
+    if isinstance(switch_port_configs, list):
+        for port in switch_port_configs[:50]:  # Limit for performance
+            if port.get("enabled") == False and port.get("poeEnabled") == True:
+                config_issues.append(
+                    {
+                        "switch": port.get("switchSerial", "Unknown"),
+                        "port": port.get("portId", "Unknown"),
+                        "issue": "POE enabled but port disabled",
+                        "type": "Configuration",
+                    }
+                )
 
     # KPI summary with more meaningful metrics
     inv_by_type = inventory_summary.get("by_type") or {}
@@ -262,11 +333,17 @@ def build_org_report(org_dir: str, org_name: str) -> str:
         ("Total Networks", str(len(networks))),
         ("Total Devices", str(sum(inv_by_type.values()) if inv_by_type else "0")),
         ("Online Devices", str(device_status_counts.get("online", 0))),
+        (
+            "Offline/Alert Devices",
+            str(sum(v for k, v in device_status_counts.items() if k != "online")),
+        ),
         ("Switches", str(inv_by_type.get("switch", 0))),
         ("Wireless APs", str(inv_by_type.get("wireless", 0))),
         ("Appliances", str(inv_by_type.get("appliance", 0))),
         ("PoE Switches", str(len(poe_switches))),
         ("High Util APs", str(len(high_util_devices))),
+        ("Port Issues Found", str(len(switch_port_issues))),
+        ("Config Issues Found", str(len(config_issues))),
     ]
 
     # Build detailed sections
@@ -369,8 +446,35 @@ def build_org_report(org_dir: str, org_name: str) -> str:
         if wireless_rows:
             extra_sections += render_section("Wireless Statistics", wireless_rows)
 
-    # Recommendations
+    # Issues Section
+    issues_html = ""
+    if switch_port_issues or config_issues or high_util_devices:
+        issues_html += "<h2>Issues Identified</h2>"
+
+        if switch_port_issues:
+            issues_html += '<h3>Port Issues</h3><table class="data"><thead><tr><th>Switch</th><th>Port</th><th>Errors</th><th>Speed</th><th>Duplex</th><th>POE Mode</th><th>Status</th></tr></thead><tbody>'
+            for issue in switch_port_issues[:10]:  # Show top 10
+                issues_html += f"<tr><td>{issue['switch']}</td><td>{issue['port']}</td><td>{issue['errors']}</td><td>{issue['speed']}Mbps</td><td>{issue['duplex']}</td><td>{issue['poeMode']}</td><td>{issue['status']}</td></tr>"
+            issues_html += "</tbody></table>"
+
+        if config_issues:
+            issues_html += '<h3>Configuration Issues</h3><table class="data"><thead><tr><th>Switch</th><th>Port</th><th>Issue</th><th>Type</th></tr></thead><tbody>'
+            for issue in config_issues[:10]:  # Show top 10
+                issues_html += f"<tr><td>{issue['switch']}</td><td>{issue['port']}</td><td>{issue['issue']}</td><td>{issue['type']}</td></tr>"
+            issues_html += "</tbody></table>"
+
+        if high_util_devices:
+            issues_html += '<h3>High Utilization Access Points (>70%)</h3><table class="data"><thead><tr><th>Device</th><th>Total Util</th><th>Non-802.11</th><th>Tx</th><th>Rx</th></tr></thead><tbody>'
+            for device in high_util_devices[:10]:  # Show top 10
+                issues_html += f"<tr><td>{device.get('serial', 'Unknown')}</td><td>{float(device.get('utilizationTotal', 0)):.1f}%</td><td>{float(device.get('utilizationNon80211', 0)):.1f}%</td><td>{float(device.get('utilization80211Tx', 0)):.1f}%</td><td>{float(device.get('utilization80211Rx', 0)):.1f}%</td></tr>"
+            issues_html += "</tbody></table>"
+
+        extra_sections += issues_html
+
+    # Recommendations (enhanced)
     rec_html = md_to_html(rec_md)
+    if rec_html:
+        extra_sections += "<h2>Detailed Recommendations</h2>" + rec_html
 
     # Charts
     model_chart = render_bar_chart(
@@ -398,6 +502,7 @@ def build_org_report(org_dir: str, org_name: str) -> str:
             "Channel Utilization (%)", util_labels, util_values, "%"
         )
 
+    # Build the complete multi-section report
     return f"""
     <section class=\"cover\">
       <div class=\"brand\">
@@ -409,22 +514,92 @@ def build_org_report(org_dir: str, org_name: str) -> str:
       <div class=\"meta\">Generated {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
     </section>
     <section class=\"content\">
-      {render_kpi_row(kpi_items)}
-      <div class=\"summary-card\">
-        <div class=\"summary-title\">Executive Summary</div>
-        <div class=\"summary-body\">
-          Network analysis reveals <strong>{device_status_counts.get("online", 0)}</strong> online devices out of <strong>{sum(inv_by_type.values()) if inv_by_type else 0}</strong> total devices. 
-          <strong>{len(high_util_devices)}</strong> access points showing high channel utilization (>70%) may require attention. 
-          PoE power budget analysis shows <strong>{len([s for s in poe_switches if float(s.get("avgWatts", 0)) > 50])}</strong> switches with significant PoE draw.
+      <!-- Table of Contents -->
+      <nav class=\"toc\">
+        <h2>Table of Contents</h2>
+        <ul>
+          <li><a href=\"#executive-summary\">Executive Summary</a></li>
+          <li><a href=\"#device-overview\">Device Overview</a></li>
+          <li><a href=\"#technical-breakdown\">Technical Breakdown</a></li>
+          <li><a href=\"#issues-identified\">Issues Identified</a></li>
+          <li><a href=\"#recommendations\">Recommendations</a></li>
+          <li><a href=\"#implementation-plan\">Implementation Plan</a></li>
+        </ul>
+      </nav>
+      
+      <!-- Executive Summary -->
+      <section id=\"executive-summary\">
+        {render_kpi_row(kpi_items)}
+        <div class=\"summary-card\">
+          <div class=\"summary-title\">Executive Summary</div>
+          <div class=\"summary-body\">
+            Network analysis reveals <strong>{device_status_counts.get("online", 0)}</strong> online devices out of <strong>{sum(inv_by_type.values()) if inv_by_type else 0}</strong> total devices. 
+            <strong>{len(high_util_devices)}</strong> access points showing high channel utilization (>70%) may require attention. 
+            PoE power budget analysis shows <strong>{len([s for s in poe_switches if float(s.get("avgWatts", 0)) > 50])}</strong> switches with significant PoE draw.
+            <strong>{len(switch_port_issues)}</strong> port issues and <strong>{len(config_issues)}</strong> configuration issues detected requiring attention.
+          </div>
         </div>
-      </div>
-      <div class=\"chart-grid\">
-        {model_chart}
-        {poe_chart}
-        {util_chart}
-      </div>
-      {rec_html}
-      {extra_sections}
+      </section>
+      
+      <!-- Charts Section -->
+      <section id=\"charts\">
+        <div class=\"chart-grid\">
+          {model_chart}
+          {poe_chart}
+          {util_chart}
+        </div>
+      </section>
+      
+      <!-- Device Overview -->
+      <section id=\"device-overview\">
+        {extra_sections}
+      </section>
+      
+      <!-- Recommendations -->
+      <section id=\"recommendations\">
+        {rec_html}
+      </section>
+      
+      <!-- Implementation Plan -->
+      <section id=\"implementation-plan\">
+        <h2>Implementation Plan & Roadmap</h2>
+        <div class=\"summary-card\">
+          <div class=\"summary-title\">Prioritized Action Items</div>
+          <div class=\"summary-body\">
+            <ol>
+              <li><strong>Immediate (0-2 weeks):</strong> Address port errors, duplex mismatches, and disabled ports with POE enabled</li>
+              <li><strong>Short-term (2-6 weeks):</strong> Optimize high-utilization APs, adjust channel widths, consider AP relocation</li>
+              <li><strong>Medium-term (6-12 weeks):</strong> Evaluate PoE budget upgrades for switches showing high power draw</li>
+              <li><strong>Long-term (3-6 months):</strong> Consider hardware upgrades for end-of-life devices, implement network segmentation</li>
+            </ol>
+          </div>
+        </div>
+        
+        <div class=\"summary-card\">
+          <div class=\"summary-title\">Hardware Placement & Optimization</div>
+          <div class=\"summary-body\">
+            <ul>
+              <li>Review AP placement for high-utilization areas identified in channel analysis</li>
+              <li>Consider adding APs in areas with >70% utilization to distribute load</li>
+              <li>Check for co-channel interference and adjust channel plans accordingly</li>
+              <li>Verify antenna orientation and coverage patterns match usage areas</li>
+            </ul>
+          </div>
+        </div>
+        
+        <div class=\"summary-card\">
+          <div class=\"summary-title\">Recommended Upgrades & Hardware Orders</div>
+          <div class=\"summary-body\">
+            <ul>
+              <li>Switches with PoE draw >80W: Consider upgrading to higher PoE budget models</li>
+              <li>APs with >70% utilization: Consider adding additional APs or upgrading to higher capacity models</li>
+              <li>Devices showing frequent errors: Consider cable replacement or port reprogramming</li>
+              <li>End-of-life devices: Budget for replacement in next fiscal cycle</li>
+              <li>Consider upgrading to switches with 10Gbps uplink capabilities for backbone</li>
+            </ul>
+          </div>
+        </div>
+      </section>
     </section>
     """
 

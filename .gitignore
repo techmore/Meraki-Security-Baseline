@@ -1,0 +1,7 @@
+.env
+meraki_backup_*/
+*/report.pdf
+*/report.html
+__pycache__/
+*.pyc
+.DS_Store
