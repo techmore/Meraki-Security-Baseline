@@ -241,6 +241,45 @@ def _load_json_file(path: str) -> Any:
         return json.load(f)
 
 
+def _artifact_dir(org_dir: str, category: str) -> str:
+    path = os.path.join(org_dir, category)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _artifact_path(org_dir: str, category: str, item_id: str, filename: str) -> str:
+    safe_item = re.sub(r"[^\w.\-]+", "_", str(item_id)).strip("._") or "unknown"
+    return os.path.join(_artifact_dir(org_dir, category), safe_item, filename)
+
+
+def _write_granular_json(org_dir: str, category: str, item_id: str, filename: str, payload: Any) -> None:
+    path = _artifact_path(org_dir, category, item_id, filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_json(path, payload)
+
+
+def _read_granular_json(org_dir: str, category: str, item_id: str, filename: str) -> Any:
+    path = _artifact_path(org_dir, category, item_id, filename)
+    if not os.path.exists(path):
+        return None
+    return _load_json_file(path)
+
+
+def _granular_cache_fresh(
+    org_dir: str,
+    category: str,
+    item_id: str,
+    filename: str,
+    max_age_h: float,
+    force: bool = False,
+) -> bool:
+    return _cache_is_fresh(
+        _artifact_path(org_dir, category, item_id, filename),
+        max_age_h=max_age_h,
+        force=force,
+    )
+
+
 def load_devices_by_type(inventory: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     by_type: Dict[str, List[Dict[str, Any]]] = {}
     for d in inventory:
@@ -1113,246 +1152,213 @@ def main() -> int:
                 "Device statuses",
             )
 
-            # Switch port statuses and configs
-            # Cache at the aggregated file level — if all three are fresh, skip the loop entirely
             switches = devices_by_type.get("switch", [])
             _sw_stat_path = _pf("switch_port_statuses.json")
             _sw_cfg_path  = _pf("switch_port_configs.json")
             _lldp_path    = _pf("lldp_cdp.json")
-            _sw_cache_fresh = (
-                _cache_is_fresh(_sw_stat_path, max_age_h=max_age_h, force=force)
-                and _cache_is_fresh(_sw_cfg_path,  max_age_h=max_age_h, force=force)
-                and _cache_is_fresh(_lldp_path,    max_age_h=max_age_h, force=force)
-            )
-            if _sw_cache_fresh:
-                port_statuses = _load_json_file(_sw_stat_path)
-                port_configs  = _load_json_file(_sw_cfg_path)
-                lldp_cdp      = _load_json_file(_lldp_path)
-                log_line(log_f, "INFO", f"Switch port data (cached, {len(switches)} switches) for {org_name}")
-            else:
-                port_statuses: Dict[str, List[Dict[str, Any]]] = {}
-                port_configs: Dict[str, List[Dict[str, Any]]] = {}
-                lldp_cdp: Dict[str, Any] = {}
-                if switches:
-                    log_line(log_f, "INFO", f"Collecting switch port data for {len(switches)} switch(es) in {org_name}")
-                for idx, sw in enumerate(switches, start=1):
-                    serial = sw.get("serial")
-                    if not serial:
-                        continue
-                    if idx == 1 or idx % 10 == 0 or idx == len(switches):
-                        log_line(log_f, "INFO", f"Switch port progress for {org_name}: {idx}/{len(switches)} ({serial})")
+            port_statuses = {}
+            port_configs = {}
+            lldp_cdp = {}
+            if switches:
+                log_line(log_f, "INFO", f"Collecting switch port data for {len(switches)} switch(es) in {org_name}")
+            for idx, sw in enumerate(switches, start=1):
+                serial = sw.get("serial")
+                if not serial:
+                    continue
+                if idx == 1 or idx % 10 == 0 or idx == len(switches):
+                    log_line(log_f, "INFO", f"Switch port progress for {org_name}: {idx}/{len(switches)} ({serial})")
+
+                if _granular_cache_fresh(org_dir, "switches", serial, "port_statuses.json", max_age_h, force):
+                    statuses = _read_granular_json(org_dir, "switches", serial, "port_statuses.json")
+                else:
                     try:
-                        statuses = paged_get(f"/devices/{serial}/switch/ports/statuses", api_key, params={"timespan": TIMESPAN_24H})
-                        port_statuses[serial] = statuses
+                        statuses = paged_get(
+                            f"/devices/{serial}/switch/ports/statuses",
+                            api_key,
+                            params={"timespan": TIMESPAN_24H},
+                        )
                     except Exception as e:
-                        port_statuses[serial] = [{"error": str(e)}]
+                        statuses = [{"error": str(e)}]
                         log_line(log_f, "ERROR", f"Switch port statuses failed for {serial}: {e}")
+                    _write_granular_json(org_dir, "switches", serial, "port_statuses.json", statuses)
+                port_statuses[serial] = statuses if isinstance(statuses, list) else [{"error": "Invalid cached data"}]
+
+                if _granular_cache_fresh(org_dir, "switches", serial, "port_configs.json", max_age_h, force):
+                    configs = _read_granular_json(org_dir, "switches", serial, "port_configs.json")
+                else:
                     try:
                         configs = paged_get(f"/devices/{serial}/switch/ports", api_key)
-                        port_configs[serial] = configs
                     except Exception as e:
-                        port_configs[serial] = [{"error": str(e)}]
+                        configs = [{"error": str(e)}]
                         log_line(log_f, "ERROR", f"Switch port configs failed for {serial}: {e}")
+                    _write_granular_json(org_dir, "switches", serial, "port_configs.json", configs)
+                port_configs[serial] = configs if isinstance(configs, list) else [{"error": "Invalid cached data"}]
+
+                if _granular_cache_fresh(org_dir, "switches", serial, "lldp_cdp.json", max_age_h, force):
+                    lldp = _read_granular_json(org_dir, "switches", serial, "lldp_cdp.json")
+                else:
                     try:
                         lldp, err = safe_get_one(f"/devices/{serial}/lldpCdp", api_key)
-                        lldp_cdp[serial] = lldp if not err else {"error": err}
+                        lldp = lldp if not err else {"error": err}
                         if err:
                             log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {err}")
                     except Exception as e:
-                        lldp_cdp[serial] = {"error": str(e)}
+                        lldp = {"error": str(e)}
                         log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {e}")
+                    _write_granular_json(org_dir, "switches", serial, "lldp_cdp.json", lldp)
+                lldp_cdp[serial] = lldp if isinstance(lldp, dict) else {"error": "Invalid cached data"}
 
-                write_json(_sw_stat_path, port_statuses)
-                write_json(_sw_cfg_path,  port_configs)
-                write_json(_lldp_path,    lldp_cdp)
+            write_json(_sw_stat_path, port_statuses)
+            write_json(_sw_cfg_path,  port_configs)
+            write_json(_lldp_path,    lldp_cdp)
 
-            # Wireless and client stats per network
-            # Network-level telemetry — cache entire per-network aggregated files
-            _net_cache_files = [
-                "wireless_connection_stats.json", "wireless_mesh_statuses.json",
-                "clients_overview.json", "wireless_rf_profiles.json",
-                "wireless_settings.json", "wireless_clients.json",
-                "wireless_ssids.json", "alerts_history.json",
-                "appliance_uplinks_usage.json",
-            ]
-            _net_cache_fresh = all(
-                _cache_is_fresh(_pf(fn), max_age_h=max_age_h, force=force)
-                for fn in _net_cache_files
-            )
-            if _net_cache_fresh:
-                wireless_connection_stats = _load_json_file(_pf("wireless_connection_stats.json"))
-                wireless_mesh_statuses    = _load_json_file(_pf("wireless_mesh_statuses.json"))
-                clients_overview          = _load_json_file(_pf("clients_overview.json"))
-                wireless_rf_profiles      = _load_json_file(_pf("wireless_rf_profiles.json"))
-                wireless_settings         = _load_json_file(_pf("wireless_settings.json"))
-                wireless_clients          = _load_json_file(_pf("wireless_clients.json"))
-                wireless_ssids            = _load_json_file(_pf("wireless_ssids.json"))
-                alerts_history            = _load_json_file(_pf("alerts_history.json"))
-                appliance_uplinks_usage   = _load_json_file(_pf("appliance_uplinks_usage.json"))
-                # appliance_baseline is derived; load from security_baseline.json if fresh
-                _sb_path = _pf("security_baseline.json")
-                appliance_baseline: Dict[str, Any] = {}
-                log_line(log_f, "INFO", f"Network-level telemetry (cached, {len(networks)} networks) for {org_name}")
-            else:
-                wireless_connection_stats: Dict[str, Any] = {}
-                wireless_mesh_statuses: Dict[str, Any] = {}
-                clients_overview: Dict[str, Any] = {}
-                wireless_rf_profiles: Dict[str, Any] = {}
-                wireless_settings: Dict[str, Any] = {}
-                wireless_clients: Dict[str, Any] = {}
-                wireless_ssids: Dict[str, Any] = {}
-                alerts_history: Dict[str, Any] = {}
-                appliance_baseline: Dict[str, Any] = {}
-                appliance_uplinks_usage: Dict[str, Any] = {}
-            if not _net_cache_fresh:
-                if networks:
-                    log_line(log_f, "INFO", f"Collecting network-level telemetry for {len(networks)} network(s) in {org_name}")
-            for idx, net in enumerate(networks if not _net_cache_fresh else [], start=1):
+            wireless_connection_stats = {}
+            wireless_mesh_statuses = {}
+            clients_overview = {}
+            wireless_rf_profiles = {}
+            wireless_settings = {}
+            wireless_clients = {}
+            wireless_ssids = {}
+            alerts_history = {}
+            appliance_baseline = {}
+            appliance_uplinks_usage = {}
+            if networks:
+                log_line(log_f, "INFO", f"Collecting network-level telemetry for {len(networks)} network(s) in {org_name}")
+            for idx, net in enumerate(networks, start=1):
                 net_id = net.get("id")
                 if not net_id:
                     continue
                 net_name = net.get("name", net_id)
                 log_line(log_f, "INFO", f"Network telemetry progress for {org_name}: {idx}/{len(networks)} ({net_name})")
-                stats, err = safe_paged_get(
-                    f"/networks/{net_id}/wireless/devices/connectionStats",
-                    api_key,
-                    params={"timespan": TIMESPAN_7D},
-                )
-                wireless_connection_stats[net_id] = stats if not err else {"error": err}
-                if err:
-                    log_line(log_f, "WARN", f"Wireless connectionStats failed for network {net_id}: {err}")
+                def _load_or_fetch_net(filename: str, fetcher: Callable[[], Tuple[Any, Optional[str]]], warn_label: str, capability_aware: bool = False) -> Any:
+                    if _granular_cache_fresh(org_dir, "networks", net_id, filename, max_age_h, force):
+                        return _read_granular_json(org_dir, "networks", net_id, filename)
+                    data, err = fetcher()
+                    payload = data if not err else {"error": err}
+                    _write_granular_json(org_dir, "networks", net_id, filename, payload)
+                    if err:
+                        level = "INFO" if capability_aware and is_capability_error(err) else "WARN"
+                        log_line(log_f, level, f"{warn_label} for network {net_id}: {err}")
+                    return payload
 
-                mesh, err = safe_get_one(
-                    f"/networks/{net_id}/wireless/meshStatuses",
-                    api_key,
-                    params={"timespan": TIMESPAN_24H},
+                wireless_connection_stats[net_id] = _load_or_fetch_net(
+                    "wireless_connection_stats.json",
+                    lambda: safe_paged_get(
+                        f"/networks/{net_id}/wireless/devices/connectionStats",
+                        api_key,
+                        params={"timespan": TIMESPAN_7D},
+                    ),
+                    "Wireless connectionStats failed",
                 )
-                wireless_mesh_statuses[net_id] = mesh if not err else {"error": err}
-                if err:
-                    level = "INFO" if is_capability_error(err) else "WARN"
-                    log_line(log_f, level, f"Wireless meshStatuses unavailable for network {net_id}: {err}")
-
-                overview, err = safe_get_one(
-                    f"/networks/{net_id}/clients/overview",
-                    api_key,
-                    params={"timespan": TIMESPAN_24H},
+                wireless_mesh_statuses[net_id] = _load_or_fetch_net(
+                    "wireless_mesh_statuses.json",
+                    lambda: safe_get_one(
+                        f"/networks/{net_id}/wireless/meshStatuses",
+                        api_key,
+                        params={"timespan": TIMESPAN_24H},
+                    ),
+                    "Wireless meshStatuses unavailable",
+                    capability_aware=True,
                 )
-                clients_overview[net_id] = overview if not err else {"error": err}
-                if err:
-                    log_line(log_f, "WARN", f"Clients overview failed for network {net_id}: {err}")
-
-                rf_profiles, err = safe_paged_get(
-                    f"/networks/{net_id}/wireless/rfProfiles",
-                    api_key,
+                clients_overview[net_id] = _load_or_fetch_net(
+                    "clients_overview.json",
+                    lambda: safe_get_one(
+                        f"/networks/{net_id}/clients/overview",
+                        api_key,
+                        params={"timespan": TIMESPAN_24H},
+                    ),
+                    "Clients overview failed",
                 )
-                wireless_rf_profiles[net_id] = rf_profiles if not err else {"error": err}
-                if err:
-                    log_line(log_f, "WARN", f"Wireless rfProfiles failed for network {net_id}: {err}")
-
-                settings, err = safe_get_one(
-                    f"/networks/{net_id}/wireless/settings",
-                    api_key,
+                wireless_rf_profiles[net_id] = _load_or_fetch_net(
+                    "wireless_rf_profiles.json",
+                    lambda: safe_paged_get(f"/networks/{net_id}/wireless/rfProfiles", api_key),
+                    "Wireless rfProfiles failed",
                 )
-                wireless_settings[net_id] = settings if not err else {"error": err}
-                if err:
-                    level = "INFO" if is_capability_error(err) else "WARN"
-                    log_line(log_f, level, f"Wireless settings unavailable for network {net_id}: {err}")
-
-                w_clients, err = safe_paged_get(
-                    f"/networks/{net_id}/wireless/clients",
-                    api_key,
-                    params={"timespan": TIMESPAN_1H},
+                wireless_settings[net_id] = _load_or_fetch_net(
+                    "wireless_settings.json",
+                    lambda: safe_get_one(f"/networks/{net_id}/wireless/settings", api_key),
+                    "Wireless settings unavailable",
+                    capability_aware=True,
                 )
-                wireless_clients[net_id] = w_clients if not err else {"error": err}
-                if err:
-                    level = "INFO" if is_capability_error(err) else "WARN"
-                    log_line(log_f, level, f"Wireless clients unavailable for network {net_id}: {err}")
-
-                # SSIDs — security config, encryption type, enabled/disabled
-                ssids, err = safe_paged_get(f"/networks/{net_id}/wireless/ssids", api_key)
-                wireless_ssids[net_id] = ssids if not err else {"error": err}
-                if err:
-                    level = "INFO" if is_capability_error(err) else "WARN"
-                    log_line(log_f, level, f"SSIDs unavailable for network {net_id}: {err}")
-
-                # Alerts history — recent triggered alerts (last 7 days, up to 100)
-                alerts, err = safe_paged_get(
-                    f"/networks/{net_id}/alerts/history",
-                    api_key,
-                    params={"perPage": PER_PAGE_EVENTS},
+                wireless_clients[net_id] = _load_or_fetch_net(
+                    "wireless_clients.json",
+                    lambda: safe_paged_get(
+                        f"/networks/{net_id}/wireless/clients",
+                        api_key,
+                        params={"timespan": TIMESPAN_1H},
+                    ),
+                    "Wireless clients unavailable",
+                    capability_aware=True,
                 )
-                alerts_history[net_id] = alerts if not err else {"error": err}
-                if err:
-                    level = "INFO" if is_capability_error(err) else "WARN"
-                    log_line(log_f, level, f"Alerts history unavailable for network {net_id}: {err}")
+                wireless_ssids[net_id] = _load_or_fetch_net(
+                    "wireless_ssids.json",
+                    lambda: safe_paged_get(f"/networks/{net_id}/wireless/ssids", api_key),
+                    "SSIDs unavailable",
+                    capability_aware=True,
+                )
+                alerts_history[net_id] = _load_or_fetch_net(
+                    "alerts_history.json",
+                    lambda: safe_paged_get(
+                        f"/networks/{net_id}/alerts/history",
+                        api_key,
+                        params={"perPage": PER_PAGE_EVENTS},
+                    ),
+                    "Alerts history unavailable",
+                    capability_aware=True,
+                )
 
                 if "appliance" in (net.get("productTypes") or []):
                     net_baseline: Dict[str, Any] = {}
-                    usage_hist, err = safe_get_one(
-                        f"/networks/{net_id}/appliance/uplinks/usageHistory",
-                        api_key,
-                        params={"timespan": TIMESPAN_7D, "resolution": RESOLUTION_1H},
+                    appliance_uplinks_usage[net_id] = _load_or_fetch_net(
+                        "appliance_uplinks_usage.json",
+                        lambda: safe_get_one(
+                            f"/networks/{net_id}/appliance/uplinks/usageHistory",
+                            api_key,
+                            params={"timespan": TIMESPAN_7D, "resolution": RESOLUTION_1H},
+                        ),
+                        "Appliance uplink usage history unavailable",
+                        capability_aware=True,
                     )
-                    appliance_uplinks_usage[net_id] = usage_hist if not err else {"error": err}
-                    if err:
-                        level = "INFO" if is_capability_error(err) else "WARN"
-                        log_line(log_f, level, f"Appliance uplink usage history unavailable for network {net_id}: {err}")
 
-                    malware, err = safe_get_one(
-                        f"/networks/{net_id}/appliance/security/malware",
-                        api_key,
+                    net_baseline["malware"] = _load_or_fetch_net(
+                        "appliance_malware.json",
+                        lambda: safe_get_one(f"/networks/{net_id}/appliance/security/malware", api_key),
+                        "Appliance malware unavailable",
+                        capability_aware=True,
                     )
-                    net_baseline["malware"] = malware if not err else {"error": err}
-                    if err:
-                        level = "INFO" if is_capability_error(err) else "WARN"
-                        log_line(log_f, level, f"Appliance malware unavailable for network {net_id}: {err}")
-
-                    intrusion, err = safe_get_one(
-                        f"/networks/{net_id}/appliance/security/intrusion",
-                        api_key,
+                    net_baseline["intrusion"] = _load_or_fetch_net(
+                        "appliance_intrusion.json",
+                        lambda: safe_get_one(f"/networks/{net_id}/appliance/security/intrusion", api_key),
+                        "Appliance intrusion unavailable",
+                        capability_aware=True,
                     )
-                    net_baseline["intrusion"] = intrusion if not err else {"error": err}
-                    if err:
-                        level = "INFO" if is_capability_error(err) else "WARN"
-                        log_line(log_f, level, f"Appliance intrusion unavailable for network {net_id}: {err}")
-
-                    firewall_settings, err = safe_get_one(
-                        f"/networks/{net_id}/appliance/firewall/settings",
-                        api_key,
+                    net_baseline["firewallSettings"] = _load_or_fetch_net(
+                        "appliance_firewall_settings.json",
+                        lambda: safe_get_one(f"/networks/{net_id}/appliance/firewall/settings", api_key),
+                        "Appliance firewall settings unavailable",
+                        capability_aware=True,
                     )
-                    net_baseline["firewallSettings"] = (
-                        firewall_settings if not err else {"error": err}
+                    net_baseline["portForwardingRules"] = _load_or_fetch_net(
+                        "appliance_port_forwarding_rules.json",
+                        lambda: safe_get_one(f"/networks/{net_id}/appliance/firewall/portForwardingRules", api_key),
+                        "Appliance port forwarding unavailable",
+                        capability_aware=True,
                     )
-                    if err:
-                        level = "INFO" if is_capability_error(err) else "WARN"
-                        log_line(log_f, level, f"Appliance firewall settings unavailable for network {net_id}: {err}")
-
-                    port_forwarding, err = safe_get_one(
-                        f"/networks/{net_id}/appliance/firewall/portForwardingRules",
-                        api_key,
-                    )
-                    net_baseline["portForwardingRules"] = (
-                        port_forwarding if not err else {"error": err}
-                    )
-                    if err:
-                        level = "INFO" if is_capability_error(err) else "WARN"
-                        log_line(log_f, level, f"Appliance port forwarding unavailable for network {net_id}: {err}")
 
                     appliance_baseline[net_id] = net_baseline
 
-            if not _net_cache_fresh:
-                write_json(_pf("wireless_connection_stats.json"), wireless_connection_stats)
-                write_json(_pf("wireless_mesh_statuses.json"), wireless_mesh_statuses)
-                write_json(_pf("clients_overview.json"), clients_overview)
-                write_json(_pf("wireless_rf_profiles.json"), wireless_rf_profiles)
-                write_json(_pf("wireless_settings.json"), wireless_settings)
-                write_json(_pf("wireless_clients.json"), wireless_clients)
-                write_json(_pf("wireless_ssids.json"), wireless_ssids)
-                write_json(_pf("alerts_history.json"), alerts_history)
-                write_json(_pf("appliance_uplinks_usage.json"), appliance_uplinks_usage)
+            write_json(_pf("wireless_connection_stats.json"), wireless_connection_stats)
+            write_json(_pf("wireless_mesh_statuses.json"), wireless_mesh_statuses)
+            write_json(_pf("clients_overview.json"), clients_overview)
+            write_json(_pf("wireless_rf_profiles.json"), wireless_rf_profiles)
+            write_json(_pf("wireless_settings.json"), wireless_settings)
+            write_json(_pf("wireless_clients.json"), wireless_clients)
+            write_json(_pf("wireless_ssids.json"), wireless_ssids)
+            write_json(_pf("alerts_history.json"), alerts_history)
+            write_json(_pf("appliance_uplinks_usage.json"), appliance_uplinks_usage)
             write_json(_pf("inventory_summary.json"), inventory_summary)
             _sb_path = _pf("security_baseline.json")
-            if not _net_cache_fresh or not _cache_is_fresh(_sb_path, max_age_h=max_age_h, force=force):
+            if force or not _cache_is_fresh(_sb_path, max_age_h=max_age_h, force=False):
                 security_baseline = summarize_appliance_security(appliance_baseline, networks)
                 write_json(_sb_path, security_baseline)
             else:

@@ -67,6 +67,22 @@ class TestWriteAndLoad:
         assert os.path.exists(p)
 
 
+class TestGranularArtifacts:
+    def test_artifact_path_is_namespaced(self, tmp_path):
+        path = mb._artifact_path(str(tmp_path), "switches", "Q2XX-1/2", "port_statuses.json")
+        assert path.endswith("switches/Q2XX-1_2/port_statuses.json")
+
+    def test_granular_roundtrip(self, tmp_path):
+        payload = {"hello": "world"}
+        mb._write_granular_json(str(tmp_path), "networks", "N_123", "clients.json", payload)
+        loaded = mb._read_granular_json(str(tmp_path), "networks", "N_123", "clients.json")
+        assert loaded == payload
+
+    def test_granular_cache_fresh_uses_underlying_file(self, tmp_path):
+        mb._write_granular_json(str(tmp_path), "switches", "SW1", "lldp_cdp.json", {"x": 1})
+        assert mb._granular_cache_fresh(str(tmp_path), "switches", "SW1", "lldp_cdp.json", max_age_h=12) is True
+
+
 # ── Schema version constant ───────────────────────────────────────────────────
 
 class TestSchemaVersion:
