@@ -80,6 +80,48 @@ class TestSchemaVersion:
         assert isinstance(mb.PIPELINE_VERSION, str)
 
 
+class TestPagedGetRateLimit:
+    def test_retry_after_header_is_honored(self, monkeypatch):
+        sleeps = []
+        calls = {"count": 0}
+
+        def fake_get_json(url, api_key):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise mb.MerakiRequestError(
+                    "HTTP 429 for test",
+                    status=429,
+                    headers={"Retry-After": "7"},
+                )
+            return {"data": [], "headers": {}, "status": 200}
+
+        monkeypatch.setattr(mb, "_get_json", fake_get_json)
+        monkeypatch.setattr(mb.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+        result = mb.paged_get("/organizations", "test-key")
+        assert result == []
+        assert calls["count"] == 2
+        assert sleeps[0] == 7
+
+    def test_retry_after_falls_back_when_header_missing(self, monkeypatch):
+        sleeps = []
+        calls = {"count": 0}
+
+        def fake_get_json(url, api_key):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise mb.MerakiRequestError("HTTP 429 for test", status=429)
+            return {"data": [], "headers": {}, "status": 200}
+
+        monkeypatch.setattr(mb, "_get_json", fake_get_json)
+        monkeypatch.setattr(mb.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+        result = mb.paged_get("/organizations", "test-key")
+        assert result == []
+        assert calls["count"] == 2
+        assert sleeps[0] == 2
+
+
 # ── summarize_availabilities ──────────────────────────────────────────────────
 
 class TestSummarizeAvailabilities:

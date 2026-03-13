@@ -40,6 +40,16 @@ PER_PAGE_EVENTS  = 100
 RESOLUTION_1H = 3_600
 
 
+class MerakiRequestError(RuntimeError):
+    """Structured request failure so callers can react to status/headers."""
+
+    def __init__(self, message: str, status: Optional[int] = None, body: str = "", headers: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.status = status
+        self.body = body
+        self.headers = headers or {}
+
+
 def _org_slug(name: str) -> str:
     """Turn an org display name into a safe directory name, e.g. 'Acme Corp' → 'Acme_Corp'."""
     slug = re.sub(r"[^\w\s\-]", "", name)          # strip special chars
@@ -88,9 +98,14 @@ def _get_json(url: str, api_key: str) -> Dict[str, Any]:
             }
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
-        raise RuntimeError(f"HTTP {e.code} for {url}: {body}")
+        raise MerakiRequestError(
+            f"HTTP {e.code} for {url}: {body}",
+            status=e.code,
+            body=body,
+            headers=dict(e.headers),
+        )
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Network error for {url}: {e}")
+        raise MerakiRequestError(f"Network error for {url}: {e}")
 
 
 def _parse_link_header(link: Optional[str]) -> Dict[str, str]:
@@ -119,13 +134,13 @@ def paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) 
         try:
             resp = _get_json(url, api_key)
             retry_count = 0  # reset on success
-        except RuntimeError as e:
-            err_str = str(e)
-            if "HTTP 429" in err_str and retry_count < _MAX_RETRIES:
-                # Honour Retry-After when present; otherwise exponential backoff
+        except MerakiRequestError as e:
+            if e.status == 429 and retry_count < _MAX_RETRIES:
+                # Honour Retry-After when present; otherwise exponential backoff.
+                retry_after_header = e.headers.get("Retry-After")
                 try:
-                    retry_after = int(re.search(r"Retry-After: (\d+)", err_str).group(1))  # type: ignore[union-attr]
-                except (AttributeError, ValueError):
+                    retry_after = int(str(retry_after_header))
+                except (TypeError, ValueError):
                     retry_after = 2
                 sleep_for = retry_after * (2 ** retry_count)
                 log.warning("Rate-limited (429); sleeping %ss (attempt %s/%s)",
