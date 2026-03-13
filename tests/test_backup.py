@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import meraki_backup as mb
+import meraki_client as mc
 
 
 # ── _cache_is_fresh ───────────────────────────────────────────────────────────
@@ -101,18 +102,18 @@ class TestPagedGetRateLimit:
         sleeps = []
         calls = {"count": 0}
 
-        def fake_get_json(url, api_key):
+        def fake_get_json(url, api_key, timeout=None):
             calls["count"] += 1
             if calls["count"] == 1:
-                raise mb.MerakiRequestError(
+                raise mc.MerakiRequestError(
                     "HTTP 429 for test",
                     status=429,
                     headers={"Retry-After": "7"},
                 )
             return {"data": [], "headers": {}, "status": 200}
 
-        monkeypatch.setattr(mb, "_get_json", fake_get_json)
-        monkeypatch.setattr(mb.time, "sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(mc, "get_json", fake_get_json)
+        monkeypatch.setattr(mc.time, "sleep", lambda seconds: sleeps.append(seconds))
 
         result = mb.paged_get("/organizations", "test-key")
         assert result == []
@@ -123,19 +124,49 @@ class TestPagedGetRateLimit:
         sleeps = []
         calls = {"count": 0}
 
-        def fake_get_json(url, api_key):
+        def fake_get_json(url, api_key, timeout=None):
             calls["count"] += 1
             if calls["count"] == 1:
-                raise mb.MerakiRequestError("HTTP 429 for test", status=429)
+                raise mc.MerakiRequestError("HTTP 429 for test", status=429)
             return {"data": [], "headers": {}, "status": 200}
 
-        monkeypatch.setattr(mb, "_get_json", fake_get_json)
-        monkeypatch.setattr(mb.time, "sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(mc, "get_json", fake_get_json)
+        monkeypatch.setattr(mc.time, "sleep", lambda seconds: sleeps.append(seconds))
 
         result = mb.paged_get("/organizations", "test-key")
         assert result == []
         assert calls["count"] == 2
         assert sleeps[0] == 2
+
+
+class TestSharedMerakiClient:
+    def test_build_url_appends_query_params(self):
+        url = mc.build_url("/organizations", {"perPage": 5, "foo": "bar"})
+        assert url.startswith("https://api.meraki.com/api/v1/organizations?")
+        assert "perPage=5" in url
+        assert "foo=bar" in url
+
+    def test_shared_paged_get_honors_retry_after(self, monkeypatch):
+        sleeps = []
+        calls = {"count": 0}
+
+        def fake_get_json(url, api_key, timeout=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise mc.MerakiRequestError(
+                    "HTTP 429 for test",
+                    status=429,
+                    headers={"Retry-After": "3"},
+                )
+            return {"data": [], "headers": {}, "status": 200}
+
+        monkeypatch.setattr(mc, "get_json", fake_get_json)
+        monkeypatch.setattr(mc.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+        result = mc.paged_get("/organizations", "test-key")
+        assert result == []
+        assert calls["count"] == 2
+        assert sleeps[0] == 3
 
 
 # ── summarize_availabilities ──────────────────────────────────────────────────

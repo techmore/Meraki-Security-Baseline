@@ -7,9 +7,6 @@ import pathlib
 import re
 import sys
 import time
-import urllib.parse
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 from typing import Callable, TextIO
 from typing import Dict, Any, List, Optional, Tuple
@@ -17,6 +14,7 @@ from typing import Dict, Any, List, Optional, Tuple
 log = logging.getLogger(__name__)
 
 from meraki_env import load_env
+from meraki_client import MerakiRequestError, get_json as _client_get_json, get_one as _client_get_one, paged_get as _client_paged_get
 
 API_BASE          = os.getenv("MERAKI_API_BASE", "https://api.meraki.com/api/v1")
 BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
@@ -38,16 +36,6 @@ TIMESPAN_31D  = 2_678_400 # seconds
 PER_PAGE_DEFAULT = 500
 PER_PAGE_EVENTS  = 100
 RESOLUTION_1H = 3_600
-
-
-class MerakiRequestError(RuntimeError):
-    """Structured request failure so callers can react to status/headers."""
-
-    def __init__(self, message: str, status: Optional[int] = None, body: str = "", headers: Optional[Dict[str, Any]] = None):
-        super().__init__(message)
-        self.status = status
-        self.body = body
-        self.headers = headers or {}
 
 
 def _org_slug(name: str) -> str:
@@ -75,101 +63,23 @@ def log_line(log_f: TextIO, level: str, message: str) -> None:
     log_f.flush()
 
 
-def _request(method: str, url: str, api_key: str) -> urllib.request.Request:
-    return urllib.request.Request(
-        url,
-        method=method,
-        headers={
-            "X-Cisco-Meraki-API-Key": api_key,
-            "Accept": "application/json",
-        },
-    )
-
-
 def _get_json(url: str, api_key: str) -> Dict[str, Any]:
-    req = _request("GET", url, api_key)
-    try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-            data = resp.read().decode("utf-8")
-            return {
-                "data":    json.loads(data) if data else None,
-                "headers": dict(resp.headers),
-                "status":  resp.status,
-            }
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") if e.fp else ""
-        raise MerakiRequestError(
-            f"HTTP {e.code} for {url}: {body}",
-            status=e.code,
-            body=body,
-            headers=dict(e.headers),
-        )
-    except urllib.error.URLError as e:
-        raise MerakiRequestError(f"Network error for {url}: {e}")
-
-
-def _parse_link_header(link: Optional[str]) -> Dict[str, str]:
-    if not link:
-        return {}
-    links = {}
-    parts = [p.strip() for p in link.split(",")]
-    for part in parts:
-        if ";" not in part:
-            continue
-        url_part, rel_part = part.split(";", 1)
-        url = url_part.strip()[1:-1]
-        rel = rel_part.strip().split("=")[1].strip('"')
-        links[rel] = url
-    return links
+    return _client_get_json(url, api_key, timeout=_REQUEST_TIMEOUT)
 
 
 def paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:
-    params = params or {}
-    params.setdefault("perPage", PER_PAGE_DEFAULT)
-    url: Optional[str] = f"{API_BASE}{path}?{urllib.parse.urlencode(params, doseq=True)}"
-    all_items: List[Any] = []
-    retry_count = 0
-
-    while url:
-        try:
-            resp = _get_json(url, api_key)
-            retry_count = 0  # reset on success
-        except MerakiRequestError as e:
-            if e.status == 429 and retry_count < _MAX_RETRIES:
-                # Honour Retry-After when present; otherwise exponential backoff.
-                retry_after_header = e.headers.get("Retry-After")
-                try:
-                    retry_after = int(str(retry_after_header))
-                except (TypeError, ValueError):
-                    retry_after = 2
-                sleep_for = retry_after * (2 ** retry_count)
-                log.warning("Rate-limited (429); sleeping %ss (attempt %s/%s)",
-                            sleep_for, retry_count + 1, _MAX_RETRIES)
-                time.sleep(sleep_for)
-                retry_count += 1
-                continue
-            raise
-
-        data = resp["data"]
-        if isinstance(data, list):
-            all_items.extend(data)
-        elif data is not None:
-            all_items.append(data)
-
-        links = _parse_link_header(resp["headers"].get("Link"))
-        url = links.get("next")
-
-        time.sleep(0.2)  # gentle API courtesy delay
-
-    return all_items
+    return _client_paged_get(
+        path,
+        api_key,
+        params=params,
+        per_page_default=PER_PAGE_DEFAULT,
+        max_retries=_MAX_RETRIES,
+        courtesy_delay=0.2,
+    )
 
 
 def get_one(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    params = params or {}
-    url = f"{API_BASE}{path}"
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
-    return _get_json(url, api_key)["data"]
+    return _client_get_one(path, api_key, params=params)
 
 
 def safe_paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> Tuple[List[Any], Optional[str]]:
