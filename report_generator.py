@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -913,6 +914,31 @@ def _build_switch_link_narrative(
     return ". ".join(parts) + "."
 
 
+def _port_heat_score(port: Dict[str, Any]) -> float:
+    usage = port.get("usageInKb") or {}
+    traffic = port.get("trafficInKbps") or {}
+    total_usage = float((usage or {}).get("total") or 0)
+    current_kbps = float((traffic or {}).get("total") or 0)
+    score = 0.0
+    if total_usage > 0:
+        score += min(60.0, max(0.0, (math.log10(total_usage + 1) - 2.0) * 15.0))
+    if current_kbps > 0:
+        score += min(40.0, max(0.0, (math.log10(current_kbps + 1) - 1.0) * 20.0))
+    if port.get("isUplink"):
+        score += 10.0
+    return round(min(100.0, score), 1)
+
+
+def _port_heat_label(score: float) -> str:
+    if score >= 75:
+        return "Hot"
+    if score >= 45:
+        return "Warm"
+    if score >= 15:
+        return "Cool"
+    return "Idle"
+
+
 def _render_switch_port_grid(
     ports: List[Dict[str, Any]],
     port_configs: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -1068,6 +1094,15 @@ def _build_switch_detail_section(
         poe_watts = float(poe_data.get("avgWatts", 0) or 0)
         active_ports = sum(1 for port in ports if str(port.get("status") or "").lower() == "connected")
         uplink_ports = [port for port in ports if port.get("isUplink")]
+        ranked_ports = sorted(
+            ports,
+            key=lambda port: (-_port_heat_score(port), _port_sort_key(port.get("portId"))),
+        )
+        hottest_ports = [
+            f"{port.get('portId')} ({_port_heat_label(_port_heat_score(port)).lower()} {_port_heat_score(port):.0f})"
+            for port in ranked_ports[:5]
+            if _port_heat_score(port) >= 15
+        ]
         link_narrative = _build_switch_link_narrative(
             serial,
             parent,
@@ -1077,7 +1112,7 @@ def _build_switch_detail_section(
             serial_to_dev,
         )
         table_rows = []
-        for port in ports:
+        for port in ranked_ports:
             port_id = str(port.get("portId") or "")
             port_config = port_configs.get(port_id)
             usage = port.get("usageInKb") or {}
@@ -1107,10 +1142,19 @@ def _build_switch_detail_section(
             port_name = "—"
             if isinstance(port_config, dict):
                 port_name = str(port_config.get("name") or "—")
+            heat_score = _port_heat_score(port)
+            heat_label = _port_heat_label(heat_score)
+            heat_badge_cls = {
+                "Hot": "badge-fail",
+                "Warm": "badge-warn",
+                "Cool": "badge-info",
+                "Idle": "badge-ok",
+            }[heat_label]
             table_rows.append(
                 "<tr>"
                 f"<td>{_he(port_id or '—')}</td>"
                 f"<td>{_he(port_name)}</td>"
+                f"<td><span class=\"badge {heat_badge_cls}\">{_he(heat_label)} {heat_score:.0f}</span></td>"
                 f"<td>{_he(role)}</td>"
                 f"<td>{_he(str(port.get('status') or 'Unknown'))}</td>"
                 f"<td>{_he(speed)}</td>"
@@ -1138,8 +1182,9 @@ def _build_switch_detail_section(
         <div class="switch-detail-stat"><span class="label">PoE Avg</span><span class="value">{poe_watts:.1f} W</span></div>
         <div class="switch-detail-stat"><span class="label">Port Issues</span><span class="value">{issue_count}</span></div>
       </div>
-      <div class="switch-detail-card">
+        <div class="switch-detail-card">
         <div class="summary-body switch-detail-narrative">{_he(link_narrative)}</div>
+        <div class="summary-body switch-detail-narrative"><strong>Heat ranking:</strong> {_he(', '.join(hottest_ports) if hottest_ports else 'No materially busy ports detected in current telemetry.')}</div>
         <div class="summary-title">Port Map</div>
         {_render_switch_port_grid(ports, port_configs, serial_to_dev)}
         <div class="switch-detail-legend">
@@ -1154,11 +1199,11 @@ def _build_switch_detail_section(
       <table class="data switch-detail-table">
         <thead>
           <tr>
-            <th>Port</th><th>Port Label</th><th>Role</th><th>Status</th><th>Speed</th><th>Duplex</th><th>VLAN / Mode</th>
+            <th>Port</th><th>Port Label</th><th>Heat</th><th>Role</th><th>Status</th><th>Speed</th><th>Duplex</th><th>VLAN / Mode</th>
             <th>Total Data</th><th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
           </tr>
         </thead>
-        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"12\">No switch port status data available.</td></tr>'}</tbody>
+        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"13\">No switch port status data available.</td></tr>'}</tbody>
       </table>
     </section>
     """
