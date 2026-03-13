@@ -8,8 +8,7 @@ cd "$(dirname "$0")"
 CUSTOM_MODEL=""
 REPORT_ONLY=0
 NO_AI_REVIEW=0
-FORCE_REFRESH=0
-CACHE_AGE=12
+NO_QUERY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model|-m)
@@ -24,30 +23,23 @@ while [[ $# -gt 0 ]]; do
       NO_AI_REVIEW=1
       shift
       ;;
-    --force-refresh)
-      FORCE_REFRESH=1
+    --no-query)
+      NO_QUERY=1
       shift
-      ;;
-    --cache-age)
-      CACHE_AGE="${2:-12}"
-      shift 2
       ;;
     --help|-h)
       echo "Usage: ./run.sh [options]"
       echo ""
       echo "  -m, --model <model>  Override the Ollama model used for AI review"
       echo "                       Default: qwen3.5:9b"
-      echo "      --report-only    Skip API collection and build from existing backups/"
+      echo "      --report-only    Skip all data collection; build reports from existing backups/"
+      echo "      --no-query       Skip API query + backup stages; use data already in backups/"
       echo "      --no-ai-review   Skip the Ollama review stage"
-      echo "      --force-refresh  Re-fetch all Meraki API data, ignoring cached files"
-      echo "      --cache-age <h>  Max age in hours for cached backup files (default: 12)"
       echo ""
       echo "  Examples:"
-      echo "    ./run.sh"
+      echo "    ./run.sh                           # full run — always fetches fresh data"
       echo "    ./run.sh --model qwen3.5:27b"
-      echo "    ./run.sh --report-only"
-      echo "    ./run.sh --force-refresh           # full re-fetch"
-      echo "    ./run.sh --cache-age 6             # treat files >6h old as stale"
+      echo "    ./run.sh --no-query                # re-generate reports from last backup"
       echo "    ./run.sh --report-only --no-ai-review"
       exit 0
       ;;
@@ -95,14 +87,19 @@ _hr() {
 }
 
 print_header() {
-  local now model_line
+  local now model_line mode_line
   now=$(date '+%A, %-d %B %Y  %H:%M')
   model_line="AI model: ${OLLAMA_MODEL:-qwen3.5:9b (default)}"
+  if   (( REPORT_ONLY == 1 )); then mode_line="Mode: report-only (skipping data collection)"
+  elif (( NO_QUERY    == 1 )); then mode_line="Mode: no-query (using existing backup data)"
+  else                              mode_line="Mode: full run (fetching fresh API data)"
+  fi
   echo ""
   echo -e "${BLU}╭$(_hr 62 ─ | tr -d '\n')╮${R}"
   printf "${BLU}│${R}  ${BOLD}${OLV}%-58s${R}  ${BLU}│${R}\n" "MERAKI NETWORK REPORT SUITE  ·  v1.0"
   printf "${BLU}│${R}  ${DIM2}%-58s${R}  ${BLU}│${R}\n" "$now"
   printf "${BLU}│${R}  ${DIM2}%-58s${R}  ${BLU}│${R}\n" "$model_line"
+  printf "${BLU}│${R}  ${DIM2}%-58s${R}  ${BLU}│${R}\n" "$mode_line"
   echo -e "${BLU}╰$(_hr 62 ─ | tr -d '\n')╯${R}"
   echo ""
 }
@@ -229,8 +226,7 @@ run_stage() {
   # Build extra args for stages that support them
   local extra_args=()
   if [[ "$script" == "meraki_backup.py" ]]; then
-    (( FORCE_REFRESH == 1 )) && extra_args+=("--force-refresh")
-    extra_args+=("--cache-age" "$CACHE_AGE")
+    extra_args+=("--force-refresh")   # always fetch fresh — use --no-query to skip entirely
   fi
 
   set +e
@@ -289,6 +285,18 @@ for i in "${!STAGES[@]}"; do
     printf "  ${BLU}${BOLD}[%d/%d]${R}  ${BOLD}%s${R}\n" "$step" "$TOTAL" "$label"
     echo -e "  ${DIM2}$(printf '─%.0s' $(seq 1 58))${R}"
     printf "  ${MGT}⚡${R}  ${BOLD}%s${R}${DIM2}  skipped in report-only mode${R}\n" "$label"
+    RESULTS[$i]="skip"
+    DURATIONS[$i]=0
+    (( SKIP_COUNT++ )) || true
+    continue
+  fi
+
+  # --no-query: skip the Query and Backup stages (indices 1 and 2) only
+  if (( NO_QUERY == 1 && (i == 1 || i == 2) )); then
+    echo ""
+    printf "  ${BLU}${BOLD}[%d/%d]${R}  ${BOLD}%s${R}\n" "$step" "$TOTAL" "$label"
+    echo -e "  ${DIM2}$(printf '─%.0s' $(seq 1 58))${R}"
+    printf "  ${MGT}⚡${R}  ${BOLD}%s${R}${DIM2}  skipped by --no-query${R}\n" "$label"
     RESULTS[$i]="skip"
     DURATIONS[$i]=0
     (( SKIP_COUNT++ )) || true
