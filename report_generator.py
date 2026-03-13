@@ -1039,7 +1039,7 @@ def _build_switch_detail_section(
         return (
             """
     <section id="switch-deep-dive" class="report-section">
-      <h1>12. Switch Deep Dive</h1>
+      <h1>13. Switch Deep Dive</h1>
       <div class="summary-card"><div class="summary-body">No switch inventory was available for detailed port-level analysis.</div></div>
     </section>
     """,
@@ -1059,7 +1059,7 @@ def _build_switch_detail_section(
     section_parts = [
         """
     <section id="switch-deep-dive" class="report-section">
-      <h1>12. Switch Deep Dive</h1>
+      <h1>13. Switch Deep Dive</h1>
       <p>Port-level views for each MS switch, including link status, negotiated speed, traffic, PoE draw, inferred connected device, and upstream/downstream placement in the switching tree.</p>
     </section>
     """
@@ -1210,6 +1210,233 @@ def _build_switch_detail_section(
         )
 
     return "".join(section_parts), toc_items
+
+
+def _build_ap_interference_section(
+    devices_by_network: Dict[str, Dict[str, Any]],
+    channel_util: Any,
+    wireless_stats: Dict[str, Any],
+) -> str:
+    if not isinstance(channel_util, list):
+        return """
+    <section id="ap-interference" class="report-section">
+      <h1>11. AP Interference Audit</h1>
+      <div class="summary-card"><div class="summary-body">No AP channel utilization data was available for interference analysis.</div></div>
+    </section>
+    """
+
+    networks_by_serial: Dict[str, str] = {}
+    ap_by_serial: Dict[str, Dict[str, Any]] = {}
+    for net_id, net_data in devices_by_network.items():
+        for dev in net_data.get("devices", []):
+            if dev.get("productType") == "wireless" and dev.get("serial"):
+                networks_by_serial[dev["serial"]] = net_id
+                ap_by_serial[dev["serial"]] = dev
+
+    per_ap_rows: List[Dict[str, Any]] = []
+    site_summary: Dict[str, Dict[str, Any]] = {}
+    for row in channel_util:
+        if not isinstance(row, dict):
+            continue
+        serial = row.get("serial")
+        net_id = (row.get("network") or {}).get("id") or networks_by_serial.get(serial) or "unassigned"
+        net_data = devices_by_network.get(net_id, {"name": "Unassigned"})
+        ap = ap_by_serial.get(serial, {})
+        stats = []
+        for band in row.get("byBand") or []:
+            if not isinstance(band, dict):
+                continue
+            wifi = float(((band.get("wifi") or {}).get("percentage")) or 0)
+            non_wifi = float(((band.get("nonWifi") or {}).get("percentage")) or 0)
+            total = float(((band.get("total") or {}).get("percentage")) or 0)
+            stats.append(
+                {
+                    "band": str(band.get("band") or "?"),
+                    "wifi": wifi,
+                    "non_wifi": non_wifi,
+                    "total": total,
+                }
+            )
+        if not stats:
+            continue
+        worst = max(stats, key=lambda item: (item["non_wifi"], item["total"], item["wifi"]))
+        avg_total = sum(item["total"] for item in stats) / len(stats)
+        avg_non_wifi = sum(item["non_wifi"] for item in stats) / len(stats)
+        avg_wifi = sum(item["wifi"] for item in stats) / len(stats)
+        conn = None
+        for item in wireless_stats.get(net_id, []) if isinstance(wireless_stats, dict) else []:
+            if isinstance(item, dict) and item.get("serial") == serial:
+                conn = item.get("connectionStats") or {}
+                break
+        assoc = int((conn or {}).get("assoc") or 0)
+        auth = int((conn or {}).get("auth") or 0)
+        success = int((conn or {}).get("success") or 0)
+        if worst["non_wifi"] >= 25 or worst["total"] >= 75:
+            severity = "High"
+            severity_cls = "check-fail"
+        elif worst["non_wifi"] >= 10 or worst["total"] >= 45:
+            severity = "Medium"
+            severity_cls = "check-warning"
+        else:
+            severity = "Low"
+            severity_cls = "check-pass"
+        findings = []
+        if worst["non_wifi"] >= 25:
+            findings.append("high non-802.11 interference")
+        elif worst["non_wifi"] >= 10:
+            findings.append("moderate non-802.11 interference")
+        if worst["wifi"] >= 40:
+            findings.append("heavy co-channel contention")
+        if worst["band"] == "2.4" and worst["total"] >= 40:
+            findings.append("crowded 2.4 GHz airtime")
+        if success and assoc and (success / max(auth, 1)) < 2:
+            findings.append("possible client retry / onboarding friction")
+        if not findings:
+            findings.append("no major RF symptoms in sampled telemetry")
+
+        recs = []
+        if worst["non_wifi"] >= 25:
+            recs.append("inspect non-Wi-Fi noise sources near the AP")
+        if worst["wifi"] >= 40:
+            recs.append("review channel plan and AP density for overlap")
+        if worst["band"] == "2.4" and worst["total"] >= 40:
+            recs.append("reduce 2.4 GHz reliance and prefer 5 GHz/6 GHz capable clients")
+        if assoc > 80:
+            recs.append("review load distribution and client balancing")
+        if not recs:
+            recs.append("continue monitoring; no immediate RF action indicated")
+
+        ap_row = {
+            "site": net_data["name"],
+            "name": ap.get("name") or serial,
+            "serial": serial,
+            "model": ap.get("model") or "",
+            "status": ap.get("status") or "unknown",
+            "band": worst["band"],
+            "worst_total": worst["total"],
+            "worst_non_wifi": worst["non_wifi"],
+            "worst_wifi": worst["wifi"],
+            "avg_total": avg_total,
+            "avg_non_wifi": avg_non_wifi,
+            "assoc": assoc,
+            "auth": auth,
+            "success": success,
+            "severity": severity,
+            "severity_cls": severity_cls,
+            "findings": findings,
+            "recommendations": recs,
+        }
+        per_ap_rows.append(ap_row)
+
+        site = site_summary.setdefault(
+            net_id,
+            {"name": net_data["name"], "aps": 0, "high": 0, "avg_non_wifi": 0.0, "avg_total": 0.0, "bands": {}},
+        )
+        site["aps"] += 1
+        site["avg_non_wifi"] += avg_non_wifi
+        site["avg_total"] += avg_total
+        if severity == "High":
+            site["high"] += 1
+        band_key = f'{worst["band"]} GHz'
+        site["bands"][band_key] = site["bands"].get(band_key, 0) + 1
+
+    if not per_ap_rows:
+        return """
+    <section id="ap-interference" class="report-section">
+      <h1>11. AP Interference Audit</h1>
+      <div class="summary-card"><div class="summary-body">APs were present, but no usable per-band channel utilization telemetry was available.</div></div>
+    </section>
+    """
+
+    site_cards = []
+    for site in sorted(site_summary.values(), key=lambda item: item["name"]):
+        aps = max(site["aps"], 1)
+        site_cards.append(
+            f"""
+      <div class="summary-card">
+        <div class="summary-title">{_he(site['name'])}</div>
+        <div class="summary-body">
+          <strong>{site['aps']}</strong> APs with RF telemetry,
+          <strong>{site['high']}</strong> high-interference APs,
+          avg non-Wi-Fi interference <strong>{site['avg_non_wifi']/aps:.1f}%</strong>,
+          avg total channel utilization <strong>{site['avg_total']/aps:.1f}%</strong>,
+          dominant affected band <strong>{_he(max(site['bands'].items(), key=lambda item: item[1])[0])}</strong>.
+        </div>
+      </div>
+        """
+        )
+
+    hot_aps = sorted(
+        per_ap_rows,
+        key=lambda item: (-item["worst_non_wifi"], -item["worst_total"], item["site"], item["name"]),
+    )
+    ap_findings_rows = "".join(
+        "<tr>"
+        f"<td>{_he(item['site'])}</td>"
+        f"<td>{_he(item['name'])}<br><code>{_he(item['serial'])}</code></td>"
+        f"<td><span class=\"{item['severity_cls']}\">{_he(item['severity'])}</span></td>"
+        f"<td>{_he(item['band'])} GHz</td>"
+        f"<td>{item['worst_non_wifi']:.1f}%</td>"
+        f"<td>{item['worst_wifi']:.1f}%</td>"
+        f"<td>{item['worst_total']:.1f}%</td>"
+        f"<td>{item['assoc']}</td>"
+        f"<td>{_he('; '.join(item['findings']))}</td>"
+        f"<td>{_he('; '.join(item['recommendations']))}</td>"
+        "</tr>"
+        for item in hot_aps[:25]
+    )
+    diagnostic_rows = "".join(
+        "<tr>"
+        f"<td>{_he(item['site'])}</td>"
+        f"<td>{_he(item['name'])}</td>"
+        f"<td>{_he(item['serial'])}</td>"
+        f"<td>{item['avg_non_wifi']:.1f}%</td>"
+        f"<td>{item['avg_total']:.1f}%</td>"
+        f"<td>{item['assoc']}</td>"
+        f"<td>{item['auth']}</td>"
+        f"<td>{item['success']}</td>"
+        "</tr>"
+        for item in hot_aps[:50]
+    )
+
+    recommendations = []
+    if any(item["worst_non_wifi"] >= 25 for item in hot_aps):
+        recommendations.append("Physically inspect high-noise AP locations for microwaves, Bluetooth density, wireless presentation gear, and other non-802.11 emitters.")
+    if any(item["worst_wifi"] >= 40 for item in hot_aps):
+        recommendations.append("Review channel reuse and AP placement in high-contention areas to reduce co-channel overlap.")
+    if any(item["band"] == "2.4" and item["worst_total"] >= 40 for item in hot_aps):
+        recommendations.append("Reduce 2.4 GHz dependency where possible by tuning SSIDs, minimum bitrates, and client steering.")
+    if not recommendations:
+        recommendations.append("No widespread interference hotspot was detected in the sampled dataset; continue trend monitoring.")
+
+    return f"""
+    <section id="ap-interference" class="report-section">
+      <h1>11. AP Interference Audit</h1>
+      <p>This section converts Meraki channel-utilization telemetry into an RF interference view by site and by AP. `non-Wi-Fi` represents likely external RF noise, while `Wi-Fi` represents airtime consumed by neighboring WLAN activity and co-channel contention. Where exact AP neighbor telemetry is unavailable, neighbor pressure is inferred from high Wi-Fi airtime on the affected band.</p>
+      {''.join(site_cards)}
+      <h2>Priority AP Findings</h2>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Site</th><th>AP</th><th>Severity</th><th>Worst Band</th><th>Non-WiFi</th>
+            <th>WiFi</th><th>Total</th><th>Assoc</th><th>Findings</th><th>Recommendations</th>
+          </tr>
+        </thead>
+        <tbody>{ap_findings_rows}</tbody>
+      </table>
+      <div class="summary-card">
+        <div class="summary-title">RF Recommendations</div>
+        <div class="summary-body"><ul>{''.join(f'<li>{_he(item)}</li>' for item in recommendations)}</ul></div>
+      </div>
+      <h2>Diagnostic Dump</h2>
+      <table class="data">
+        <thead>
+          <tr><th>Site</th><th>AP</th><th>Serial</th><th>Avg Non-WiFi</th><th>Avg Total</th><th>Assoc</th><th>Auth</th><th>Success</th></tr>
+        </thead>
+        <tbody>{diagnostic_rows}</tbody>
+      </table>
+    </section>
+    """
 
 
 def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str:
@@ -1452,6 +1679,11 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         poe_by_serial,
         port_issues_by_switch,
     )
+    ap_interference_html = _build_ap_interference_section(
+        devices_by_network,
+        channel_util,
+        wireless_stats,
+    )
     toc_switch_subitems = "".join(
         f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
         for anchor, label in toc_switch_items
@@ -1505,10 +1737,14 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </li>
         <li>
           <span class="toc-num">11</span>
-          <span class="toc-entry">Client Analysis</span>
+          <span class="toc-entry">AP Interference Audit</span>
         </li>
         <li>
           <span class="toc-num">12</span>
+          <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">13</span>
           <span class="toc-entry">Switch Deep Dive</span>
           <ol class="toc-sub">
             {toc_switch_subitems}
@@ -2385,7 +2621,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     client_analysis_html = f"""
     <section id="client-analysis" class="report-section">
-      <h1>11. Client Analysis</h1>
+      <h1>12. Client Analysis</h1>
       <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
          in this backup. Wired client detail requires switch port client data which is not
          collected in the current pipeline.</p>
@@ -2406,6 +2642,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         + recommendations_html
         + cis8_html
         + licensing_html
+        + ap_interference_html
         + client_analysis_html
         + switch_deep_dive_html
     )
