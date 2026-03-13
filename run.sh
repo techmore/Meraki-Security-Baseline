@@ -234,7 +234,7 @@ run_stage() {
   fi
 
   set +e
-  python3 "$script" "${extra_args[@]}" > "$tmp" 2>&1
+  python3 "$script" "${extra_args[@]+"${extra_args[@]}"}" > "$tmp" 2>&1
   local exit_code=$?
   set -e
 
