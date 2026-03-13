@@ -638,11 +638,56 @@ def _topo_summary_rows(
     lldp_cdp: Dict[str, Any],
     switch_port_statuses_by_switch: Dict[str, Any],
 ) -> List[List[str]]:
+    serial_to_dev, _, parent_of, children_of, edge_counts = _build_topology_facts(
+        devices, lldp_cdp, switch_port_statuses_by_switch
+    )
+    if not serial_to_dev:
+        return []
+
+    rows: List[List[str]] = []
+    for serial, dev in sorted(
+        serial_to_dev.items(),
+        key=lambda item: (
+            0 if item[1].get("productType") == "appliance" else 1,
+            item[1].get("name") or item[0],
+        ),
+    ):
+        if dev.get("productType") not in ("appliance", "switch"):
+            continue
+        parent = parent_of.get(serial)
+        if parent:
+            parent_name = serial_to_dev.get(parent[0], {}).get("name") or parent[0]
+            upstream = f"{parent_name} ({parent[1]} -> {parent[2] or '?'})"
+        else:
+            upstream = "Internet edge"
+        rows.append(
+            [
+                dev.get("name") or serial,
+                dev.get("model") or "",
+                upstream,
+                str(len(children_of.get(serial, []))),
+                str(edge_counts.get(serial, 0)),
+            ]
+        )
+    return rows
+
+
+def _build_topology_facts(
+    devices: List[Dict[str, Any]],
+    lldp_cdp: Dict[str, Any],
+    switch_port_statuses_by_switch: Dict[str, Any],
+) -> Tuple[
+    Dict[str, Dict[str, Any]],
+    Dict[str, Dict[str, Dict[str, Any]]],
+    Dict[str, Tuple[str, str, str]],
+    Dict[str, List[str]],
+    Dict[str, int],
+]:
     serial_to_dev = {
         d.get("serial"): d for d in devices if isinstance(d, dict) and d.get("serial")
     }
     if not serial_to_dev:
-        return []
+        return {}, {}, {}, {}, {}
 
     def _norm(value: Any) -> str:
         return "".join(ch for ch in str(value).lower() if ch.isalnum())
@@ -662,7 +707,7 @@ def _topo_summary_rows(
                 }
 
     parent_of: Dict[str, Tuple[str, str, str]] = {}
-    child_counts: Dict[str, int] = {}
+    children_of: Dict[str, List[str]] = {}
     edge_counts: Dict[str, int] = {}
 
     for local_serial, data in lldp_cdp.items() if isinstance(lldp_cdp, dict) else []:
@@ -703,36 +748,234 @@ def _topo_summary_rows(
                     str(local_port),
                     neighbor_port,
                 )
-                child_counts[neighbor_serial] = child_counts.get(neighbor_serial, 0) + 1
+                children_of.setdefault(neighbor_serial, [])
+                if local_serial not in children_of[neighbor_serial]:
+                    children_of[neighbor_serial].append(local_serial)
             elif local_type == "switch" and neighbor_type in ("wireless", "camera", "sensor"):
                 edge_counts[local_serial] = edge_counts.get(local_serial, 0) + 1
 
-    rows: List[List[str]] = []
-    for serial, dev in sorted(
-        serial_to_dev.items(),
-        key=lambda item: (
-            0 if item[1].get("productType") == "appliance" else 1,
-            item[1].get("name") or item[0],
-        ),
-    ):
-        if dev.get("productType") not in ("appliance", "switch"):
+    return serial_to_dev, status_by_switch, parent_of, children_of, edge_counts
+
+
+def _format_usage_kb(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        return "0 KB"
+    units = ["KB", "MB", "GB", "TB"]
+    idx = 0
+    while amount >= 1024 and idx < len(units) - 1:
+        amount /= 1024.0
+        idx += 1
+    return f"{amount:.1f} {units[idx]}" if idx else f"{int(amount)} {units[idx]}"
+
+
+def _describe_port_neighbor(port: Dict[str, Any], serial_to_dev: Dict[str, Dict[str, Any]]) -> str:
+    for key in ("lldp", "cdp"):
+        disc = port.get(key)
+        if not isinstance(disc, dict):
             continue
-        parent = parent_of.get(serial)
-        if parent:
-            parent_name = serial_to_dev.get(parent[0], {}).get("name") or parent[0]
-            upstream = f"{parent_name} ({parent[1]} -> {parent[2] or '?'})"
-        else:
-            upstream = "Internet edge"
-        rows.append(
-            [
-                dev.get("name") or serial,
-                dev.get("model") or "",
-                upstream,
-                str(child_counts.get(serial, 0)),
-                str(edge_counts.get(serial, 0)),
-            ]
+        label = (
+            disc.get("systemName")
+            or disc.get("deviceName")
+            or disc.get("platform")
+            or disc.get("deviceId")
+            or disc.get("chassisId")
         )
-    return rows
+        remote_port = disc.get("portId") or disc.get("portDescription")
+        if label and remote_port:
+            return f"{label} ({remote_port})"
+        if label:
+            return str(label)
+    client_count = port.get("clientCount")
+    if client_count:
+        return f"{client_count} downstream client(s)"
+    return "No neighbor data"
+
+
+def _render_switch_port_grid(ports: List[Dict[str, Any]]) -> str:
+    if not ports:
+        return '<div class="switch-detail-grid-empty">No port telemetry available.</div>'
+    cells = []
+    for port in sorted(ports, key=lambda item: (0, int(str(item.get("portId", "0")).split("/")[0])) if str(item.get("portId", "")).isdigit() else (1, str(item.get("portId", "")))):
+        status = str(port.get("status") or "").lower()
+        speed = str(port.get("speed") or "")
+        errors = port.get("errors") or []
+        if isinstance(errors, str):
+            errors = [errors]
+        if errors:
+            cls = "issue"
+        elif port.get("isUplink"):
+            cls = "uplink"
+        elif "disconnected" in status or "not connected" in status or not status:
+            cls = "down"
+        elif speed.startswith("100 ") or speed.startswith("10 "):
+            cls = "warn"
+        elif (port.get("poe") or {}).get("isAllocated"):
+            cls = "poe"
+        else:
+            cls = "ok"
+        cells.append(
+            f'<div class="switch-port-cell {cls}"><span>{_he(str(port.get("portId") or "?"))}</span></div>'
+        )
+    return f'<div class="switch-port-grid">{"".join(cells)}</div>'
+
+
+def _build_switch_detail_section(
+    devices_by_network: Dict[str, Dict[str, Any]],
+    lldp_cdp: Dict[str, Any],
+    switch_port_statuses_by_switch: Dict[str, Any],
+    poe_by_serial: Dict[str, Dict[str, Any]],
+    port_issues_by_switch: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[str, List[str]]:
+    switch_entries: List[Tuple[str, str, str, str]] = []
+    for net_data in sorted(devices_by_network.values(), key=lambda item: item["name"]):
+        for dev in sorted(
+            [d for d in net_data["devices"] if d.get("productType") == "switch"],
+            key=lambda item: item.get("name") or item.get("serial") or "",
+        ):
+            switch_entries.append(
+                (
+                    net_data["name"],
+                    dev.get("serial") or "",
+                    dev.get("name") or dev.get("model") or dev.get("serial") or "Switch",
+                    dev.get("model") or "",
+                )
+            )
+
+    toc_items = [f"{site} - {name}" for site, _, name, _ in switch_entries]
+    if not switch_entries:
+        return (
+            """
+    <section id="switch-deep-dive" class="report-section">
+      <h1>12. Switch Deep Dive</h1>
+      <div class="summary-card"><div class="summary-body">No switch inventory was available for detailed port-level analysis.</div></div>
+    </section>
+    """,
+            toc_items,
+        )
+
+    all_devices = [
+        device
+        for net_data in devices_by_network.values()
+        for device in net_data.get("devices", [])
+        if isinstance(device, dict)
+    ]
+    serial_to_dev, status_by_switch, parent_of, children_of, edge_counts = _build_topology_facts(
+        all_devices, lldp_cdp, switch_port_statuses_by_switch
+    )
+
+    section_parts = [
+        """
+    <section id="switch-deep-dive" class="report-section">
+      <h1>12. Switch Deep Dive</h1>
+      <p>Port-level views for each MS switch, including link status, negotiated speed, traffic, PoE draw, inferred connected device, and upstream/downstream placement in the switching tree.</p>
+    </section>
+    """
+    ]
+
+    for site_name, serial, switch_name, model in switch_entries:
+        switch = serial_to_dev.get(serial, {})
+        ports = sorted(
+            status_by_switch.get(serial, {}).values(),
+            key=lambda item: (
+                0,
+                int(str(item.get("portId", "0"))) if str(item.get("portId", "")).isdigit() else 0,
+                str(item.get("portId") or ""),
+            ),
+        )
+        parent = parent_of.get(serial)
+        parent_name = (
+            serial_to_dev.get(parent[0], {}).get("name") or parent[0]
+            if parent else "Internet edge"
+        )
+        child_names = [
+            serial_to_dev.get(child, {}).get("name") or child
+            for child in children_of.get(serial, [])
+        ]
+        issue_count = len(port_issues_by_switch.get(serial, []))
+        poe_data = poe_by_serial.get(serial, {})
+        poe_watts = float(poe_data.get("avgWatts", 0) or 0)
+        active_ports = sum(1 for port in ports if str(port.get("status") or "").lower() == "connected")
+        uplink_ports = [port for port in ports if port.get("isUplink")]
+        table_rows = []
+        for port in ports:
+            usage = port.get("usageInKb") or {}
+            traffic = port.get("trafficInKbps") or {}
+            errors = port.get("errors") or []
+            if isinstance(errors, str):
+                errors = [errors]
+            warnings = port.get("warnings") or []
+            if isinstance(warnings, str):
+                warnings = [warnings]
+            poe = port.get("poe") or {}
+            power_wh = port.get("powerUsageInWh")
+            indicators = []
+            if port.get("isUplink"):
+                indicators.append('<span class="badge badge-info">Uplink</span>')
+            if poe.get("isAllocated") or (isinstance(power_wh, (int, float)) and power_wh > 0):
+                indicators.append('<span class="badge badge-ok">PoE</span>')
+            if errors:
+                indicators.append(f'<span class="badge badge-fail">{len(errors)} error(s)</span>')
+            elif warnings:
+                indicators.append(f'<span class="badge badge-warn">{len(warnings)} warning(s)</span>')
+            speed = str(port.get("speed") or "—")
+            if speed.startswith("100 ") or speed.startswith("10 "):
+                indicators.append(f'<span class="badge badge-warn">{_he(speed)}</span>')
+            table_rows.append(
+                "<tr>"
+                f"<td>{_he(str(port.get('portId') or '—'))}</td>"
+                f"<td>{_he(str(port.get('status') or 'Unknown'))}</td>"
+                f"<td>{_he(speed)}</td>"
+                f"<td>{_he(str(port.get('duplex') or '—'))}</td>"
+                f"<td>{_format_usage_kb((usage or {}).get('total'))}</td>"
+                f"<td>{_he(str((traffic or {}).get('total') or '—'))} Kbps</td>"
+                f"<td>{_he(f'{float(power_wh):.1f} Wh' if isinstance(power_wh, (int, float)) else ('Allocated' if poe.get('isAllocated') else '—'))}</td>"
+                f"<td>{''.join(indicators) or '—'}</td>"
+                f"<td>{_inline_md(_describe_port_neighbor(port, serial_to_dev))}</td>"
+                "</tr>"
+            )
+
+        section_parts.append(
+            f"""
+    <section class="report-section switch-detail-page">
+      <h1>{_he(switch_name)}</h1>
+      <p class="switch-detail-kicker">{_he(site_name)} &mdash; {_he(model or 'MS switch')} &mdash; <code>{_he(serial)}</code></p>
+      <div class="switch-detail-stats">
+        <div class="switch-detail-stat"><span class="label">Above</span><span class="value">{_he(parent_name if not parent else f'{parent_name} ({parent[1]} -> {parent[2] or "?"})')}</span></div>
+        <div class="switch-detail-stat"><span class="label">Below</span><span class="value">{_he(', '.join(child_names) if child_names else 'No downstream switches discovered')}</span></div>
+        <div class="switch-detail-stat"><span class="label">Edge Devices</span><span class="value">{edge_counts.get(serial, 0)}</span></div>
+        <div class="switch-detail-stat"><span class="label">Ports Up</span><span class="value">{active_ports} / {len(ports) or 0}</span></div>
+        <div class="switch-detail-stat"><span class="label">Uplinks</span><span class="value">{_he(', '.join(str(port.get('portId')) for port in uplink_ports) if uplink_ports else 'None flagged')}</span></div>
+        <div class="switch-detail-stat"><span class="label">PoE Avg</span><span class="value">{poe_watts:.1f} W</span></div>
+        <div class="switch-detail-stat"><span class="label">Port Issues</span><span class="value">{issue_count}</span></div>
+      </div>
+      <div class="switch-detail-card">
+        <div class="summary-title">Port Map</div>
+        {_render_switch_port_grid(ports)}
+        <div class="switch-detail-legend">
+          <span><i class="swatch ok"></i>healthy</span>
+          <span><i class="swatch uplink"></i>uplink</span>
+          <span><i class="swatch poe"></i>PoE</span>
+          <span><i class="swatch warn"></i>low speed / warning</span>
+          <span><i class="swatch issue"></i>error</span>
+          <span><i class="swatch down"></i>down</span>
+        </div>
+      </div>
+      <table class="data switch-detail-table">
+        <thead>
+          <tr>
+            <th>Port</th><th>Status</th><th>Speed</th><th>Duplex</th><th>Total Data</th>
+            <th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"9\">No switch port status data available.</td></tr>'}</tbody>
+      </table>
+    </section>
+    """
+        )
+
+    return "".join(section_parts), toc_items
 
 
 def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str:
@@ -964,6 +1207,16 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         f'<li class="toc-sub-item">{net_data["name"]}</li>'
         for net_data in sorted(devices_by_network.values(), key=lambda x: x["name"])
     )
+    switch_deep_dive_html, toc_switch_items = _build_switch_detail_section(
+        devices_by_network,
+        lldp_cdp,
+        switch_port_statuses_by_switch,
+        poe_by_serial,
+        port_issues_by_switch,
+    )
+    toc_switch_subitems = "".join(
+        f'<li class="toc-sub-item">{_he(item)}</li>' for item in toc_switch_items
+    )
     toc_html = f"""
     <section class="toc-page">
       <div class="toc-header">Table of Contents</div>
@@ -1014,6 +1267,13 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         <li>
           <span class="toc-num">11</span>
           <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">12</span>
+          <span class="toc-entry">Switch Deep Dive</span>
+          <ol class="toc-sub">
+            {toc_switch_subitems}
+          </ol>
         </li>
       </ol>
     </section>
@@ -1908,6 +2168,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         + cis8_html
         + licensing_html
         + client_analysis_html
+        + switch_deep_dive_html
     )
 
 
@@ -2267,6 +2528,107 @@ def build_html(doc_title: str, body: str) -> str:
     }}
     .bottleneck-list li::before {{
       color: #e65100;
+    }}
+    .switch-detail-page {{
+      page-break-before: always;
+      max-width: none;
+    }}
+    .switch-detail-kicker {{
+      margin-top: -8px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .switch-detail-stats {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }}
+    .switch-detail-stat {{
+      border: 1px solid var(--line);
+      background: var(--stone-50);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }}
+    .switch-detail-stat .label {{
+      display: block;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: var(--muted);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }}
+    .switch-detail-stat .value {{
+      display: block;
+      font-size: 12px;
+      color: var(--ink);
+      line-height: 1.45;
+      word-break: break-word;
+    }}
+    .switch-detail-card {{
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin: 16px 0 18px;
+    }}
+    .switch-port-grid {{
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 10px;
+    }}
+    .switch-port-cell {{
+      border-radius: 6px;
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      color: #1f2937;
+    }}
+    .switch-port-cell.ok {{ background: #e5efe5; border-color: #b7d2b7; }}
+    .switch-port-cell.uplink {{ background: #dbeafe; border-color: #93c5fd; }}
+    .switch-port-cell.poe {{ background: #dcfce7; border-color: #86efac; }}
+    .switch-port-cell.warn {{ background: #fef3c7; border-color: #fcd34d; }}
+    .switch-port-cell.issue {{ background: #fee2e2; border-color: #fca5a5; }}
+    .switch-port-cell.down {{ background: #e5e7eb; border-color: #cbd5e1; color: #6b7280; }}
+    .switch-detail-grid-empty {{
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px 0 2px;
+    }}
+    .switch-detail-legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 12px;
+      font-size: 11px;
+      color: var(--muted);
+    }}
+    .switch-detail-legend span {{
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }}
+    .switch-detail-legend .swatch {{
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      display: inline-block;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+    }}
+    .switch-detail-legend .swatch.ok {{ background: #e5efe5; }}
+    .switch-detail-legend .swatch.uplink {{ background: #dbeafe; }}
+    .switch-detail-legend .swatch.poe {{ background: #dcfce7; }}
+    .switch-detail-legend .swatch.warn {{ background: #fef3c7; }}
+    .switch-detail-legend .swatch.issue {{ background: #fee2e2; }}
+    .switch-detail-legend .swatch.down {{ background: #e5e7eb; }}
+    .switch-detail-table td {{
+      vertical-align: top;
     }}
 
     /* =====================================================
