@@ -793,6 +793,46 @@ def _describe_port_neighbor(port: Dict[str, Any], serial_to_dev: Dict[str, Dict[
     return "No neighbor data"
 
 
+def _port_role_label(
+    port: Dict[str, Any],
+    port_config: Optional[Dict[str, Any]],
+    serial_to_dev: Dict[str, Dict[str, Any]],
+) -> str:
+    if port.get("isUplink"):
+        return "Uplink"
+    for key in ("lldp", "cdp"):
+        disc = port.get(key)
+        if not isinstance(disc, dict):
+            continue
+        label = " ".join(
+            str(disc.get(field) or "")
+            for field in ("systemName", "platform", "deviceId", "systemDescription")
+        ).lower()
+        if " meraki mr" in f" {label}" or "ap " in label:
+            return "Access point"
+        if "phone" in label or "voip" in label or "sip-" in label:
+            return "Phone"
+        if "camera" in label or "mv" in label:
+            return "Camera"
+        if "switch" in label or "ms" in label:
+            return "Downlink"
+    if port.get("clientCount"):
+        return "Endpoint"
+    if isinstance(port_config, dict):
+        if str(port_config.get("type") or "").lower() == "trunk":
+            return "Trunk"
+        if port_config.get("voiceVlan"):
+            return "Voice endpoint"
+        if port_config.get("vlan"):
+            return "Access"
+    return "Unknown"
+
+
+def _switch_anchor(serial: str, name: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", f"{name}-{serial}".lower()).strip("-")
+    return f"switch-{base}"
+
+
 def _render_switch_port_grid(ports: List[Dict[str, Any]]) -> str:
     if not ports:
         return '<div class="switch-detail-grid-empty">No port telemetry available.</div>'
@@ -825,9 +865,10 @@ def _build_switch_detail_section(
     devices_by_network: Dict[str, Dict[str, Any]],
     lldp_cdp: Dict[str, Any],
     switch_port_statuses_by_switch: Dict[str, Any],
+    switch_port_configs_by_switch: Dict[str, Any],
     poe_by_serial: Dict[str, Dict[str, Any]],
     port_issues_by_switch: Dict[str, List[Dict[str, Any]]],
-) -> Tuple[str, List[str]]:
+) -> Tuple[str, List[Tuple[str, str]]]:
     switch_entries: List[Tuple[str, str, str, str]] = []
     for net_data in sorted(devices_by_network.values(), key=lambda item: item["name"]):
         for dev in sorted(
@@ -843,7 +884,7 @@ def _build_switch_detail_section(
                 )
             )
 
-    toc_items = [f"{site} - {name}" for site, _, name, _ in switch_entries]
+    toc_items = [(_switch_anchor(serial, name), f"{site} - {name}") for site, serial, name, _ in switch_entries]
     if not switch_entries:
         return (
             """
@@ -884,6 +925,11 @@ def _build_switch_detail_section(
                 str(item.get("portId") or ""),
             ),
         )
+        port_configs = {
+            str(p.get("portId")): p
+            for p in (switch_port_configs_by_switch.get(serial) or [])
+            if isinstance(p, dict)
+        }
         parent = parent_of.get(serial)
         parent_name = (
             serial_to_dev.get(parent[0], {}).get("name") or parent[0]
@@ -900,6 +946,8 @@ def _build_switch_detail_section(
         uplink_ports = [port for port in ports if port.get("isUplink")]
         table_rows = []
         for port in ports:
+            port_id = str(port.get("portId") or "")
+            port_config = port_configs.get(port_id)
             usage = port.get("usageInKb") or {}
             traffic = port.get("trafficInKbps") or {}
             errors = port.get("errors") or []
@@ -922,12 +970,26 @@ def _build_switch_detail_section(
             speed = str(port.get("speed") or "—")
             if speed.startswith("100 ") or speed.startswith("10 "):
                 indicators.append(f'<span class="badge badge-warn">{_he(speed)}</span>')
+            role = _port_role_label(port, port_config, serial_to_dev)
+            vlan_text = "—"
+            if isinstance(port_config, dict):
+                if str(port_config.get("type") or "").lower() == "trunk":
+                    allowed = port_config.get("allowedVlans") or "all"
+                    vlan_text = f"Trunk ({allowed})"
+                elif port_config.get("vlan") or port_config.get("voiceVlan"):
+                    vlan_text = f"Access {port_config.get('vlan') or '—'}"
+                    if port_config.get("voiceVlan"):
+                        vlan_text += f" / Voice {port_config.get('voiceVlan')}"
+                elif port_config.get("name"):
+                    vlan_text = str(port_config.get("name"))
             table_rows.append(
                 "<tr>"
-                f"<td>{_he(str(port.get('portId') or '—'))}</td>"
+                f"<td>{_he(port_id or '—')}</td>"
+                f"<td>{_he(role)}</td>"
                 f"<td>{_he(str(port.get('status') or 'Unknown'))}</td>"
                 f"<td>{_he(speed)}</td>"
                 f"<td>{_he(str(port.get('duplex') or '—'))}</td>"
+                f"<td>{_he(vlan_text)}</td>"
                 f"<td>{_format_usage_kb((usage or {}).get('total'))}</td>"
                 f"<td>{_he(str((traffic or {}).get('total') or '—'))} Kbps</td>"
                 f"<td>{_he(f'{float(power_wh):.1f} Wh' if isinstance(power_wh, (int, float)) else ('Allocated' if poe.get('isAllocated') else '—'))}</td>"
@@ -938,7 +1000,7 @@ def _build_switch_detail_section(
 
         section_parts.append(
             f"""
-    <section class="report-section switch-detail-page">
+    <section id="{_switch_anchor(serial, switch_name)}" class="report-section switch-detail-page">
       <h1>{_he(switch_name)}</h1>
       <p class="switch-detail-kicker">{_he(site_name)} &mdash; {_he(model or 'MS switch')} &mdash; <code>{_he(serial)}</code></p>
       <div class="switch-detail-stats">
@@ -965,11 +1027,11 @@ def _build_switch_detail_section(
       <table class="data switch-detail-table">
         <thead>
           <tr>
-            <th>Port</th><th>Status</th><th>Speed</th><th>Duplex</th><th>Total Data</th>
-            <th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
+            <th>Port</th><th>Role</th><th>Status</th><th>Speed</th><th>Duplex</th><th>VLAN / Mode</th>
+            <th>Total Data</th><th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
           </tr>
         </thead>
-        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"9\">No switch port status data available.</td></tr>'}</tbody>
+        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"11\">No switch port status data available.</td></tr>'}</tbody>
       </table>
     </section>
     """
@@ -1013,6 +1075,9 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         wireless_clients = []
     switch_port_statuses_by_switch = (
         load_json(os.path.join(org_dir, "switch_port_statuses.json")) or {}
+    )
+    switch_port_configs_by_switch = (
+        load_json(os.path.join(org_dir, "switch_port_configs.json")) or {}
     )
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
@@ -1211,11 +1276,13 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         devices_by_network,
         lldp_cdp,
         switch_port_statuses_by_switch,
+        switch_port_configs_by_switch,
         poe_by_serial,
         port_issues_by_switch,
     )
     toc_switch_subitems = "".join(
-        f'<li class="toc-sub-item">{_he(item)}</li>' for item in toc_switch_items
+        f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
+        for anchor, label in toc_switch_items
     )
     toc_html = f"""
     <section class="toc-page">
@@ -2415,6 +2482,13 @@ def build_html(doc_title: str, body: str) -> str:
       color: var(--muted);
       padding: 4px 0;
       border: none;
+    }}
+    .toc-sub-item a {{
+      color: inherit;
+      text-decoration: none;
+    }}
+    .toc-sub-item a:hover {{
+      text-decoration: underline;
     }}
     .toc-sub-item::before {{
       display: none;
