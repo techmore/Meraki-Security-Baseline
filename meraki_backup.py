@@ -27,8 +27,10 @@ _MAX_RETRIES      = int(os.getenv("MERAKI_MAX_RETRIES",     "5"))    # 429 retri
 TIMESPAN_1H   =   3_600   # seconds
 TIMESPAN_24H  =  86_400   # seconds
 TIMESPAN_7D   = 604_800   # seconds
+TIMESPAN_31D  = 2_678_400 # seconds
 PER_PAGE_DEFAULT = 500
 PER_PAGE_EVENTS  = 100
+RESOLUTION_1H = 3_600
 
 
 def _org_slug(name: str) -> str:
@@ -1055,6 +1057,7 @@ def main() -> int:
             wireless_ssids: Dict[str, Any] = {}
             alerts_history: Dict[str, Any] = {}
             appliance_baseline: Dict[str, Any] = {}
+            appliance_uplinks_usage: Dict[str, Any] = {}
             if networks:
                 log_line(log_f, "INFO", f"Collecting network-level telemetry for {len(networks)} network(s) in {org_name}")
             for idx, net in enumerate(networks, start=1):
@@ -1138,6 +1141,16 @@ def main() -> int:
 
                 if "appliance" in (net.get("productTypes") or []):
                     net_baseline: Dict[str, Any] = {}
+                    usage_hist, err = safe_get_one(
+                        f"/networks/{net_id}/appliance/uplinks/usageHistory",
+                        api_key,
+                        params={"timespan": TIMESPAN_7D, "resolution": RESOLUTION_1H},
+                    )
+                    appliance_uplinks_usage[net_id] = usage_hist if not err else {"error": err}
+                    if err:
+                        level = "INFO" if is_capability_error(err) else "WARN"
+                        log_line(log_f, level, f"Appliance uplink usage history unavailable for network {net_id}: {err}")
+
                     malware, err = safe_get_one(
                         f"/networks/{net_id}/appliance/security/malware",
                         api_key,
@@ -1188,6 +1201,7 @@ def main() -> int:
             write_json(os.path.join(org_dir, "wireless_clients.json"), wireless_clients)
             write_json(os.path.join(org_dir, "wireless_ssids.json"), wireless_ssids)
             write_json(os.path.join(org_dir, "alerts_history.json"), alerts_history)
+            write_json(os.path.join(org_dir, "appliance_uplinks_usage.json"), appliance_uplinks_usage)
             write_json(os.path.join(org_dir, "inventory_summary.json"), inventory_summary)
             security_baseline = summarize_appliance_security(appliance_baseline, networks)
             write_json(os.path.join(org_dir, "security_baseline.json"), security_baseline)

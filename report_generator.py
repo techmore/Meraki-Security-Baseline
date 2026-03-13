@@ -1557,6 +1557,7 @@ def _build_ap_interference_section(
 
 def _build_wan_capacity_section(
     uplink_statuses: Any,
+    appliance_uplinks_usage: Any,
     devices_avail: List[Dict[str, Any]],
     networks_by_id: Dict[str, Dict[str, Any]],
 ) -> str:
@@ -1574,6 +1575,7 @@ def _build_wan_capacity_section(
     rows = []
     summary = {"active": 0, "ready": 0, "failed": 0, "unknown_speed": 0}
     recommendation_flags = {"missing_speed": False, "degraded": False}
+    usage_by_network = appliance_uplinks_usage if isinstance(appliance_uplinks_usage, dict) else {}
     for device in uplink_statuses:
         if not isinstance(device, dict):
             continue
@@ -1598,9 +1600,30 @@ def _build_wan_capacity_section(
                 summary["unknown_speed"] += 1
                 recommendation_flags["missing_speed"] = True
             max_capacity = str(speed or "Unknown")
+            net_usage = usage_by_network.get(net_id)
+            series = []
+            if isinstance(net_usage, list):
+                for point in net_usage:
+                    if not isinstance(point, dict):
+                        continue
+                    if str(point.get("interface") or "").lower() != str(interface).lower():
+                        continue
+                    recv = float(point.get("receivedKbps") or 0)
+                    sent = float(point.get("sentKbps") or 0)
+                    series.append(recv + sent)
             sustain = "Current snapshot only"
             peak = "Historical peak not collected"
             freq = "Usage frequency unavailable"
+            avg_usage = 0.0
+            peak_usage = 0.0
+            busy_samples = 0
+            if series:
+                avg_usage = sum(series) / len(series)
+                peak_usage = max(series)
+                busy_samples = sum(1 for value in series if value >= max(peak_usage * 0.7, 1))
+                sustain = f"{avg_usage:.0f} Kbps avg over 7d"
+                peak = f"{peak_usage:.0f} Kbps peak"
+                freq = f"{busy_samples}/{len(series)} samples near peak"
             score = 100 if status == "active" else 72 if status == "ready" else 28
             rows.append(
                 {
@@ -1615,6 +1638,8 @@ def _build_wan_capacity_section(
                     "peak": peak,
                     "frequency": freq,
                     "score": score,
+                    "avg_usage": avg_usage,
+                    "peak_usage": peak_usage,
                 }
             )
 
@@ -1644,6 +1669,8 @@ def _build_wan_capacity_section(
     recommendations = []
     if recommendation_flags["missing_speed"]:
         recommendations.append("The current backup contains uplink state but not negotiated or subscribed WAN bandwidth for one or more circuits. Add Meraki appliance uplink usage/history endpoints so the report can show sustained throughput and true peak demand.")
+    if not any(item["peak_usage"] > 0 for item in rows):
+        recommendations.append("WAN usage history is still absent or empty for these circuits. Validate the new appliance uplink usage history collection path and confirm the Meraki org/network supports that endpoint.")
     if recommendation_flags["degraded"]:
         recommendations.append("At least one WAN uplink is not active. Review failover policy, ISP health, and MX uplink preferences before release.")
     if not recommendations:
@@ -1652,7 +1679,7 @@ def _build_wan_capacity_section(
     return f"""
     <section id="wan-capacity" class="report-section">
       <h1>11. Internet Capacity &amp; Utilization</h1>
-      <p>This section summarizes current MX WAN uplink state and the maximum internet capacity exposed by the current backup. The present dataset is a live-state snapshot; it can show WAN status and any reported link speed, but it does not yet include historical throughput curves for sustained load, peak load windows, or usage frequency over time.</p>
+      <p>This section summarizes current MX WAN uplink state and the maximum internet capacity exposed by the current backup. When Meraki uplink usage history is available, the report also estimates sustained load, observed peak load, and how frequently the circuit approaches its own observed peak during the sampled period.</p>
       <div class="summary-card">
         <div class="summary-title">WAN Snapshot</div>
         <div class="summary-body">
@@ -1720,6 +1747,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         load_json(os.path.join(org_dir, "switch_port_configs.json")) or {}
     )
     uplink_statuses = load_json(os.path.join(org_dir, "uplink_statuses.json")) or []
+    appliance_uplinks_usage = load_json(os.path.join(org_dir, "appliance_uplinks_usage.json")) or {}
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -1935,6 +1963,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     )
     wan_capacity_html = _build_wan_capacity_section(
         uplink_statuses,
+        appliance_uplinks_usage,
         devices_avail,
         networks_by_id,
     )
