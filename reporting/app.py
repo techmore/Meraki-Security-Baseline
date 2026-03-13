@@ -74,6 +74,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     devices_statuses_raw = load_json(os.path.join(org_dir, "devices_statuses.json")) or []
     clients_overview_raw = load_json(os.path.join(org_dir, "clients_overview.json")) or {}
     licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
+    rf_profiles = load_json(os.path.join(org_dir, "wireless_rf_profiles.json")) or {}
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -133,6 +134,54 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         high_util_devices = []
         moderate_util_devices = []
         ap_util_by_serial = {}
+
+    # Build AP-to-switch mapping from LLDP/CDP data
+    # lldp_cdp: {switch_serial: {ports: {port_id: {lldp/cdp: {...}}}}}
+    _mac_to_serial: Dict[str, str] = {
+        d.get("mac", "").lower().replace(":", ""): d.get("serial", "")
+        for d in devices_avail
+        if d.get("mac") and d.get("serial")
+    }
+    ap_to_switch: Dict[str, Dict] = {}   # ap_serial -> {switch, port}
+    switch_to_aps: Dict[str, list] = {}  # switch_serial -> [ap_serial, ...]
+    if isinstance(lldp_cdp, dict):
+        for sw_serial, sw_lldp in lldp_cdp.items():
+            if not isinstance(sw_lldp, dict):
+                continue
+            for port_id, port_data in sw_lldp.get("ports", {}).items():
+                if not isinstance(port_data, dict):
+                    continue
+                _lldp = port_data.get("lldp") or {}
+                _cdp  = port_data.get("cdp")  or {}
+                _desc = (
+                    _lldp.get("systemDescription")
+                    or _cdp.get("platform")
+                    or ""
+                ).lower()
+                if "mr" not in _desc and "access point" not in _desc:
+                    continue
+                _mac = (
+                    _lldp.get("chassisId")
+                    or port_data.get("deviceMac", "")
+                ).lower().replace(":", "").replace("-", "")
+                _ap_serial = _mac_to_serial.get(_mac)
+                if _ap_serial:
+                    ap_to_switch[_ap_serial] = {
+                        "switch": sw_serial,
+                        "port": port_id,
+                        "name": _lldp.get("systemName") or _cdp.get("deviceId") or "",
+                    }
+                    switch_to_aps.setdefault(sw_serial, []).append(_ap_serial)
+
+    # Flatten wireless_stats to ap_serial -> connectionStats
+    # wireless_stats: {net_id: [{serial, connectionStats}]}
+    ap_conn_stats: Dict[str, Dict] = {}
+    if isinstance(wireless_stats, dict):
+        for _net_id, _ap_list in wireless_stats.items():
+            if isinstance(_ap_list, list):
+                for _entry in _ap_list:
+                    if isinstance(_entry, dict) and _entry.get("serial"):
+                        ap_conn_stats[_entry["serial"]] = _entry.get("connectionStats", {})
 
     # Switch port issue analysis
     # Note: the Meraki API returns "errors" and "warnings" as lists of strings, not integers.
@@ -971,6 +1020,19 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # =========================================================
     # SECTION 4: TRAFFIC FLOWS & BOTTLENECK ANALYSIS
     # =========================================================
+    def _speed_num(s) -> int | None:
+        try:
+            return int(str(s).split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    # Flatten RF profiles to net_id -> first profile (for band-steering / width context)
+    _rf_by_net: Dict[str, Dict] = {}
+    if isinstance(rf_profiles, dict):
+        for _nid, _profs in rf_profiles.items():
+            if isinstance(_profs, list) and _profs:
+                _rf_by_net[_nid] = _profs[0]
+
     traffic_sections_html = []
 
     for net_id, net_data in sorted(
@@ -979,180 +1041,333 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         net_name = net_data["name"]
         nd = net_data["devices"]
         appliances = [d for d in nd if d.get("productType") == "appliance"]
-        switches = [d for d in nd if d.get("productType") == "switch"]
-        aps = [d for d in nd if d.get("productType") == "wireless"]
+        switches   = [d for d in nd if d.get("productType") == "switch"]
+        aps        = [d for d in nd if d.get("productType") == "wireless"]
 
         sec = f'<div class="building-section">'
         sec += f"<h2>{net_name}</h2>"
 
-        # Traffic path flow diagram
-        path_parts = []
+        # ── Path summary bar ───────────────────────────────────────────────
+        _path_parts = []
         if appliances:
-            mx_name = appliances[0].get("name") or appliances[0].get(
-                "serial", "MX Appliance"
+            _mx = appliances[0]
+            _mx_name = _mx.get("name") or _mx.get("model") or _mx.get("serial", "MX")
+            _mx_status = _mx.get("status", "unknown")
+            _mx_cls = "badge-ok" if _mx_status == "online" else "badge-fail"
+            _path_parts.append(
+                f'Internet &rarr; <span class="badge {_mx_cls}">{_he(_mx_name)}</span>'
             )
-            path_parts.append(f"Internet &rarr; MX ({mx_name})")
         else:
-            path_parts.append("Internet &rarr; [No MX]")
+            _path_parts.append('Internet &rarr; <span class="badge badge-warn">[No MX]</span>')
+
         if switches:
-            path_parts.append(f"MS Switches ({len(switches)})")
+            _sw_issues_total = sum(len(port_issues_by_switch.get(s.get("serial",""), [])) for s in switches)
+            _sw_cls = "badge-fail" if _sw_issues_total > 5 else ("badge-warn" if _sw_issues_total else "badge-ok")
+            _path_parts.append(
+                f'<span class="badge {_sw_cls}">{len(switches)} Switch{"es" if len(switches)!=1 else ""}'
+                f'{f" · {_sw_issues_total} issue(s)" if _sw_issues_total else ""}</span>'
+            )
         if aps:
-            path_parts.append(f"MR APs ({len(aps)})")
-        path_parts.append("Clients")
+            _ap_high = sum(
+                1 for a in aps
+                if float((ap_util_by_serial.get(a.get("serial","")) or {}).get("utilizationTotal", 0)) > 70
+            )
+            _ap_cls = "badge-fail" if _ap_high else "badge-ok"
+            _path_parts.append(
+                f'<span class="badge {_ap_cls}">{len(aps)} AP{"s" if len(aps)!=1 else ""}'
+                f'{f" · {_ap_high} high-util" if _ap_high else ""}</span>'
+            )
+        _path_parts.append("Clients")
 
         sec += (
-            f'<p class="traffic-path">Data path: '
-            f'<span class="path-flow">{" &rarr; ".join(path_parts)}</span></p>'
+            f'<p class="traffic-path">'
+            f'{"&nbsp;&rarr;&nbsp;".join(_path_parts)}</p>'
         )
 
-        # --- Per-switch analysis ---
+        # ── MX / WAN edge ─────────────────────────────────────────────────
+        if appliances:
+            sec += "<h3>WAN / Edge</h3>"
+            for _mx in appliances:
+                _serial  = _mx.get("serial", "")
+                _name    = _mx.get("name") or _mx.get("model") or _serial
+                _status  = _mx.get("status", "unknown")
+                _model   = _mx.get("model", "")
+                _s_cls   = "badge-ok" if _status == "online" else "badge-fail"
+
+                # WAN uplink status for this appliance
+                _uplinks = [
+                    u for u in uplink_statuses
+                    if isinstance(u, dict) and u.get("serial") == _serial
+                ]
+                _uplink_rows = ""
+                _wan_issues = []
+                for _ul in _uplinks:
+                    for _iface in _ul.get("uplinks", []):
+                        _iface_st = _iface.get("status", "unknown")
+                        _iface_cls = "badge-ok" if _iface_st == "active" else "badge-fail"
+                        _ip = _iface.get("ip") or "—"
+                        _isp = _iface.get("provider") or _iface.get("publicIp") or "—"
+                        _uplink_rows += (
+                            f"<tr>"
+                            f"<td>{_he(_iface.get('interface',''))}</td>"
+                            f'<td><span class="badge {_iface_cls}">{_he(_iface_st)}</span></td>'
+                            f"<td>{_he(_ip)}</td>"
+                            f"<td>{_he(str(_isp))}</td>"
+                            f"</tr>"
+                        )
+                        if _iface_st != "active":
+                            _wan_issues.append(
+                                f"WAN interface <strong>{_he(_iface.get('interface',''))}</strong> "
+                                f"is <strong>{_he(_iface_st)}</strong> — failover or ISP outage"
+                            )
+
+                sec += '<div class="device-card">'
+                sec += (
+                    f'<div class="device-card-header">'
+                    f"<strong>{_he(_name)}</strong>"
+                    f' <code class="serial">{_serial}</code>'
+                    f' <span class="badge">{_he(_model)}</span>'
+                    f' <span class="badge {_s_cls}">{_status}</span>'
+                    f"</div>"
+                )
+                if _uplink_rows:
+                    sec += (
+                        '<table class="data dense" style="margin-top:6px">'
+                        "<thead><tr><th>Interface</th><th>Status</th><th>IP</th><th>ISP / Public IP</th></tr></thead>"
+                        f"<tbody>{_uplink_rows}</tbody></table>"
+                    )
+                if _wan_issues:
+                    sec += '<div class="bottleneck-list"><strong>WAN Issues:</strong><ul>'
+                    for _b in _wan_issues:
+                        sec += f"<li>{_b}</li>"
+                    sec += "</ul></div>"
+                elif _uplinks:
+                    sec += '<div class="device-ok">&#10003; All WAN interfaces active.</div>'
+                sec += "</div>"  # device-card
+
+        # ── Per-switch + grouped AP analysis ──────────────────────────────
         if switches:
-            sec += "<h3>Switches</h3>"
-            for sw in switches:
-                serial = sw.get("serial", "")
-                sw_name = sw.get("name") or sw.get("model") or serial
+            sec += "<h3>Switches &amp; Connected APs</h3>"
+
+            # Sort switches: ones with issues first, then by name
+            def _sw_sort_key(sw):
+                _s = sw.get("serial", "")
+                _issues = len(port_issues_by_switch.get(_s, []))
+                return (-_issues, (sw.get("name") or "").lower())
+
+            for sw in sorted(switches, key=_sw_sort_key):
+                serial   = sw.get("serial", "")
+                sw_name  = sw.get("name") or sw.get("model") or serial
+                sw_model = sw.get("model", "")
                 sw_status = sw.get("status", "unknown")
                 status_cls = "badge-ok" if sw_status == "online" else "badge-fail"
                 poe_data = poe_by_serial.get(serial, {})
                 poe_watts = float(poe_data.get("avgWatts", 0)) if poe_data else 0.0
                 sw_issues = port_issues_by_switch.get(serial, [])
+                sw_ap_serials = switch_to_aps.get(serial, [])
+                sw_ap_devices = [
+                    a for a in aps if a.get("serial") in set(sw_ap_serials)
+                ]
 
                 sec += '<div class="device-card">'
                 sec += (
                     f'<div class="device-card-header">'
-                    f"<strong>{sw_name}</strong> "
-                    f'<code class="serial">{serial}</code> '
-                    f'<span class="badge {status_cls}">{sw_status}</span>'
+                    f"<strong>{_he(sw_name)}</strong>"
+                    f' <code class="serial">{serial}</code>'
+                    f' <span class="badge">{_he(sw_model)}</span>'
+                    f' <span class="badge {status_cls}">{sw_status}</span>'
                 )
                 if poe_watts > 0:
-                    poe_cls = "badge-warn" if poe_watts > 60 else "badge-info"
-                    sec += f' <span class="badge {poe_cls}">PoE avg {poe_watts:.0f} W</span>'
+                    _poe_cls = "badge-fail" if poe_watts > 100 else ("badge-warn" if poe_watts > 60 else "badge-info")
+                    sec += f' <span class="badge {_poe_cls}">PoE {poe_watts:.0f} W avg</span>'
+                if sw_ap_devices:
+                    sec += f' <span class="badge badge-info">{len(sw_ap_devices)} AP{"s" if len(sw_ap_devices)!=1 else ""} connected</span>'
                 sec += "</div>"
 
+                # Port issues table (compact)
                 if sw_issues:
                     sec += (
                         f'<div class="device-issues">'
-                        f"<strong>&#9888; {len(sw_issues)} port issue(s) detected:</strong>"
-                        f"<ul>"
+                        f"<strong>&#9888; {len(sw_issues)} port issue(s):</strong>"
+                        f'<table class="data dense" style="margin-top:4px">'
+                        f"<thead><tr><th>Port</th><th>Speed</th><th>Duplex</th><th>Errors</th><th>Uplink</th></tr></thead><tbody>"
                     )
-                    for issue in sw_issues[:8]:
+                    for _issue in sw_issues[:10]:
+                        _err_str = ", ".join(_issue["errors"]) if _issue["errors"] else "—"
+                        _ul_flag = "Yes" if _issue.get("isUplink") else ""
                         sec += (
-                            f"<li>Port <strong>{issue['port']}</strong>: "
-                            f"speed {issue['speed']}, "
-                            f"duplex {issue['duplex']}, "
-                            f"errors: {', '.join(issue['errors']) if issue['errors'] else 'none'}"
-                            f"</li>"
+                            f"<tr>"
+                            f"<td><strong>{_he(str(_issue['port']))}</strong></td>"
+                            f"<td>{_he(str(_issue['speed']))}</td>"
+                            f"<td>{_he(str(_issue['duplex']))}</td>"
+                            f"<td>{_he(_err_str)}</td>"
+                            f"<td>{_ul_flag}</td>"
+                            f"</tr>"
                         )
-                    if len(sw_issues) > 8:
-                        sec += f"<li>&hellip; and {len(sw_issues) - 8} more</li>"
+                    if len(sw_issues) > 10:
+                        sec += f"<tr><td colspan='5'>&hellip; +{len(sw_issues)-10} more</td></tr>"
+                    sec += "</tbody></table></div>"
+
+                # Bottleneck bullets
+                _bottlenecks = []
+                _low_spd = [i for i in sw_issues if i.get("isUplink") and _speed_num(i.get("speed")) in [10, 100]]
+                _err_ports = [i for i in sw_issues if i.get("error_count", 0) > 0]
+                if _low_spd:
+                    _bottlenecks.append(
+                        f"{len(_low_spd)} uplink port(s) below 1 Gbps &mdash; "
+                        "review cabling, SFP, or ISP handoff"
+                    )
+                if _err_ports:
+                    _bottlenecks.append(
+                        f"{len(_err_ports)} port(s) with frame errors &mdash; "
+                        "cable degradation, bad SFP, or transceiver mismatch"
+                    )
+                if poe_watts > 100:
+                    _bottlenecks.append(
+                        f"Very high PoE draw ({poe_watts:.0f} W avg) &mdash; "
+                        "verify remaining budget; power-limited ports drop connected APs"
+                    )
+                elif poe_watts > 60:
+                    _bottlenecks.append(
+                        f"Elevated PoE draw ({poe_watts:.0f} W avg) &mdash; "
+                        "monitor budget if additional PoE devices are planned"
+                    )
+                if _bottlenecks:
+                    sec += '<div class="bottleneck-list"><strong>Bottlenecks / Concerns:</strong><ul>'
+                    for _b in _bottlenecks:
+                        sec += f"<li>{_b}</li>"
                     sec += "</ul></div>"
-                else:
+                elif not sw_issues:
                     sec += '<div class="device-ok">&#10003; No port issues detected.</div>'
 
-                # Bottleneck analysis
-                bottlenecks = []
-                def _speed_num(s):
-                    try: return int(str(s).split()[0])
-                    except (ValueError, IndexError): return None
-                low_speed = [i for i in sw_issues if i.get("isUplink") and _speed_num(i.get("speed")) in [10, 100]]
-                err_ports = [i for i in sw_issues if i.get("error_count", 0) > 0]
-                if low_speed:
-                    bottlenecks.append(
-                        f"{len(low_speed)} uplink port(s) negotiating below 1 Gbps &mdash; "
-                        f"review cabling, optics, or expected circuit handoff speed"
-                    )
-                if err_ports:
-                    bottlenecks.append(
-                        f"{len(err_ports)} port(s) with frame errors &mdash; "
-                        f"likely cable degradation, bad SFP, or transceiver mismatch"
-                    )
-                if poe_watts > 60:
-                    bottlenecks.append(
-                        f"High PoE draw ({poe_watts:.0f} W avg) &mdash; "
-                        f"verify remaining PoE budget to prevent power-limited port failures"
-                    )
-
-                if bottlenecks:
-                    sec += '<div class="bottleneck-list"><strong>Bottlenecks / Concerns:</strong><ul>'
-                    for b in bottlenecks:
-                        sec += f"<li>{b}</li>"
-                    sec += "</ul></div>"
-
-                sec += "</div>"  # device-card
-
-        # --- Per-AP analysis ---
-        if aps:
-            sec += "<h3>Access Points</h3>"
-            for ap in aps:
-                serial = ap.get("serial", "")
-                ap_name = ap.get("name") or ap.get("model") or serial
-                ap_status = ap.get("status", "unknown")
-                status_cls = "badge-ok" if ap_status == "online" else "badge-fail"
-                util_data = ap_util_by_serial.get(serial, {})
-                total_util = float(util_data.get("utilizationTotal", 0)) if util_data else 0.0
-                tx_util = float(util_data.get("utilization80211Tx", 0)) if util_data else 0.0
-                rx_util = float(util_data.get("utilization80211Rx", 0)) if util_data else 0.0
-                non80211 = float(util_data.get("utilizationNon80211", 0)) if util_data else 0.0
-
-                if total_util > 70:
-                    util_cls = "badge-fail"
-                elif total_util > 30:
-                    util_cls = "badge-warn"
-                else:
-                    util_cls = "badge-ok"
-
-                sec += '<div class="device-card">'
-                sec += (
-                    f'<div class="device-card-header">'
-                    f"<strong>{ap_name}</strong> "
-                    f'<code class="serial">{serial}</code> '
-                    f'<span class="badge {status_cls}">{ap_status}</span>'
-                )
-                if util_data:
-                    sec += f' <span class="badge {util_cls}">Ch util {total_util:.0f}%</span>'
-                sec += "</div>"
-
-                if util_data:
+                # ── APs connected to this switch ───────────────────────
+                if sw_ap_devices:
                     sec += (
-                        f'<div class="util-breakdown">'
-                        f"Tx: {tx_util:.1f}% &nbsp;|&nbsp; "
-                        f"Rx: {rx_util:.1f}% &nbsp;|&nbsp; "
-                        f"Non-802.11 interference: {non80211:.1f}%"
-                        f"</div>"
+                        '<div class="ap-under-switch">'
+                        '<table class="data dense">'
+                        "<thead><tr>"
+                        "<th>AP</th><th>Model</th><th>Status</th>"
+                        "<th>Ch Util</th><th>Tx%</th><th>Non-802.11%</th>"
+                        "<th>Assoc fails</th><th>Auth fails</th><th>Notes</th>"
+                        "</tr></thead><tbody>"
                     )
+                    for _ap in sorted(sw_ap_devices, key=lambda a: (a.get("name") or "").lower()):
+                        _ap_serial  = _ap.get("serial", "")
+                        _ap_name    = _ap.get("name") or _ap.get("model") or _ap_serial
+                        _ap_model   = _ap.get("model", "")
+                        _ap_status  = _ap.get("status", "unknown")
+                        _ap_s_cls   = "badge-ok" if _ap_status == "online" else "badge-fail"
+                        _util       = ap_util_by_serial.get(_ap_serial) or {}
+                        _tot_util   = float(_util.get("utilizationTotal", 0))
+                        _tx_util    = float(_util.get("utilization80211Tx", 0))
+                        _non80211   = float(_util.get("utilizationNon80211", 0))
+                        _conn       = ap_conn_stats.get(_ap_serial) or {}
+                        _assoc_fail = int(_conn.get("assoc", 0))
+                        _auth_fail  = int(_conn.get("auth", 0))
+                        _success    = int(_conn.get("success", 0))
+                        _total_att  = _assoc_fail + _auth_fail + _success
+                        _fail_rate  = round(100 * (_assoc_fail + _auth_fail) / _total_att) if _total_att else 0
 
-                # AP bottleneck analysis
-                ap_issues = []
-                if ap_status != "online":
-                    ap_issues.append(
-                        f"AP is <strong>{ap_status}</strong> &mdash; "
-                        f"clients in coverage area have no wireless service"
-                    )
-                if total_util > 70:
-                    ap_issues.append(
-                        f"Channel utilization at {total_util:.0f}% &mdash; "
-                        f"AP is near capacity; expect higher latency and reduced throughput"
-                    )
-                if non80211 > 20:
-                    ap_issues.append(
-                        f"Non-802.11 interference at {non80211:.0f}% &mdash; "
-                        f"significant RF noise (Bluetooth, adjacent-channel sources, microwave)"
-                    )
-                if tx_util > 50:
-                    ap_issues.append(
-                        f"High Tx utilization ({tx_util:.0f}%) &mdash; "
-                        f"consider adding APs or reducing SSID count to distribute load"
-                    )
+                        _util_cls = (
+                            "badge-fail" if _tot_util > 70
+                            else "badge-warn" if _tot_util > 30
+                            else "badge-ok"
+                        )
+                        _ap_notes = []
+                        if _ap_status != "online":
+                            _ap_notes.append(f'<span class="badge badge-fail">{_ap_status}</span>')
+                        if _tot_util > 70:
+                            _ap_notes.append('<span class="badge badge-fail">High util</span>')
+                        if _non80211 > 20:
+                            _ap_notes.append(f'<span class="badge badge-warn">Interference {_non80211:.0f}%</span>')
+                        if _fail_rate > 15:
+                            _ap_notes.append(f'<span class="badge badge-warn">Fail rate {_fail_rate}%</span>')
 
-                if ap_issues:
-                    sec += '<div class="bottleneck-list"><strong>Issues / Bottlenecks:</strong><ul>'
-                    for b in ap_issues:
-                        sec += f"<li>{b}</li>"
-                    sec += "</ul></div>"
-                elif ap_status == "online":
-                    sec += '<div class="device-ok">&#10003; AP operating normally.</div>'
+                        sec += (
+                            f"<tr>"
+                            f"<td>{_he(_ap_name)}</td>"
+                            f"<td><code>{_he(_ap_model)}</code></td>"
+                            f'<td><span class="badge {_ap_s_cls}">{_ap_status}</span></td>'
+                            f'<td><span class="badge {_util_cls}">{_tot_util:.0f}%</span></td>'
+                            f"<td>{_tx_util:.0f}%</td>"
+                            f"<td>{_non80211:.0f}%</td>"
+                            f"<td>{_assoc_fail if _assoc_fail else '—'}</td>"
+                            f"<td>{_auth_fail if _auth_fail else '—'}</td>"
+                            f"<td>{''.join(_ap_notes) if _ap_notes else '&#10003;'}</td>"
+                            f"</tr>"
+                        )
+                    sec += "</tbody></table></div>"
 
                 sec += "</div>"  # device-card
+
+        # ── APs not mapped to a switch (no LLDP entry) ────────────────────
+        _unmapped_aps = [a for a in aps if a.get("serial") not in ap_to_switch]
+        if _unmapped_aps:
+            sec += "<h3>Access Points (no switch LLDP mapping)</h3>"
+            sec += (
+                '<table class="data dense">'
+                "<thead><tr>"
+                "<th>AP</th><th>Model</th><th>Status</th>"
+                "<th>Ch Util</th><th>Tx%</th><th>Non-802.11%</th>"
+                "<th>Assoc fails</th><th>Auth fails</th>"
+                "</tr></thead><tbody>"
+            )
+            for _ap in sorted(_unmapped_aps, key=lambda a: (a.get("name") or "").lower()):
+                _s   = _ap.get("serial", "")
+                _nm  = _ap.get("name") or _ap.get("model") or _s
+                _mod = _ap.get("model", "")
+                _st  = _ap.get("status", "unknown")
+                _util = ap_util_by_serial.get(_s) or {}
+                _tu  = float(_util.get("utilizationTotal", 0))
+                _tx  = float(_util.get("utilization80211Tx", 0))
+                _n80 = float(_util.get("utilizationNon80211", 0))
+                _conn = ap_conn_stats.get(_s) or {}
+                _af  = int(_conn.get("assoc", 0))
+                _auf = int(_conn.get("auth", 0))
+                _ucls = "badge-fail" if _tu > 70 else ("badge-warn" if _tu > 30 else "badge-ok")
+                _scls = "badge-ok" if _st == "online" else "badge-fail"
+                sec += (
+                    f"<tr>"
+                    f"<td>{_he(_nm)}</td>"
+                    f"<td><code>{_he(_mod)}</code></td>"
+                    f'<td><span class="badge {_scls}">{_st}</span></td>'
+                    f'<td><span class="badge {_ucls}">{_tu:.0f}%</span></td>'
+                    f"<td>{_tx:.0f}%</td><td>{_n80:.0f}%</td>"
+                    f"<td>{_af if _af else '—'}</td><td>{_auf if _auf else '—'}</td>"
+                    f"</tr>"
+                )
+            sec += "</tbody></table>"
+
+        # ── RF profile summary for this network ───────────────────────────
+        _rf = _rf_by_net.get(net_id)
+        if _rf:
+            _band_op   = (_rf.get("apBandSettings") or {}).get("bandOperationMode", "")
+            _band_steer = (_rf.get("apBandSettings") or {}).get("bandSteeringEnabled", False)
+            _client_bal = _rf.get("clientBalancingEnabled", False)
+            _5g         = _rf.get("fiveGhzSettings") or {}
+            _5g_width   = _5g.get("channelWidth", "auto")
+            _5g_maxpwr  = _5g.get("maxPower")
+            _rf_notes   = []
+            if not _band_steer:
+                _rf_notes.append("Band steering is <strong>disabled</strong> — clients may prefer 2.4 GHz, increasing congestion on that band")
+            if not _client_bal:
+                _rf_notes.append("Client load balancing is <strong>disabled</strong> — uneven client distribution across APs is more likely")
+            if _5g_width not in ("auto", "80", "40"):
+                _rf_notes.append(f"5 GHz channel width is set to <strong>{_5g_width}</strong> — verify this is intentional for the environment density")
+
+            sec += (
+                '<div class="summary-card" style="margin-top:12px">'
+                '<div class="summary-title">RF Profile (first profile in network)</div>'
+                '<div class="summary-body">'
+                f"Band mode: <strong>{_he(_band_op or '—')}</strong> &nbsp;|&nbsp; "
+                f"Band steering: <strong>{'On' if _band_steer else 'Off'}</strong> &nbsp;|&nbsp; "
+                f"Client balancing: <strong>{'On' if _client_bal else 'Off'}</strong> &nbsp;|&nbsp; "
+                f"5 GHz width: <strong>{_he(str(_5g_width))}</strong>"
+                + (f" &nbsp;|&nbsp; Max power: <strong>{_5g_maxpwr} dBm</strong>" if _5g_maxpwr else "")
+            )
+            if _rf_notes:
+                sec += "<ul style='margin-top:6px'>" + "".join(f"<li>{n}</li>" for n in _rf_notes) + "</ul>"
+            sec += "</div></div>"
 
         sec += "</div>"  # building-section
         traffic_sections_html.append(sec)
@@ -1160,9 +1375,9 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     traffic_html = f"""
     <section id="traffic-flows" class="report-section">
       <h1>4. Traffic Flows &amp; Bottleneck Analysis</h1>
-      <p>Each site is presented in functional order: MX appliance (WAN edge) &rarr;
-         MS switches (LAN distribution) &rarr; MR access points (wireless edge) &rarr;
-         end clients. Issues and bottlenecks are called out at each layer.</p>
+      <p>Each site shows the traffic path from WAN edge (MX) through switching and wireless
+         layers to end clients. Switches include their connected APs with RF utilization and
+         connection failure signals. Bottlenecks are called out at each layer.</p>
       {"".join(traffic_sections_html)}
     </section>
     """

@@ -379,6 +379,24 @@ def build_html(doc_title: str, body: str) -> str:
     .bottleneck-list li::before {{
       color: #e65100;
     }}
+    /* AP-under-switch grouped table */
+    .ap-under-switch {{
+      margin: 6px 0 0 16px;
+      border-left: 3px solid var(--line);
+      padding-left: 10px;
+    }}
+    .ap-under-switch table.data.dense th,
+    .ap-under-switch table.data.dense td {{
+      font-size: 9.5px;
+      padding: 3px 6px;
+    }}
+    @media print {{
+      .ap-under-switch table.data.dense th,
+      .ap-under-switch table.data.dense td {{
+        font-size: 8.5px;
+        padding: 2px 5px;
+      }}
+    }}
     .switch-detail-page {{
       page-break-before: always;
       max-width: none;
