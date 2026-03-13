@@ -2109,6 +2109,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     )
     networks = load_json(os.path.join(org_dir, "networks.json")) or []
     security_baseline = load_json(os.path.join(org_dir, "security_baseline.json")) or {}
+    org_dirs = find_org_dirs(BACKUPS_DIR)
 
     # Device availability analysis
     device_status_counts: Dict[str, int] = {}
@@ -3156,6 +3157,35 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # SECTION 9: LICENSING SUMMARY
     # =========================================================
     licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
+    licensing_mode = (
+        licensing_data.get("licenseMode")
+        if isinstance(licensing_data, dict)
+        else None
+    )
+    org_license_paths = [os.path.join(path, "licensing.json") for path in org_dirs]
+    org_license_payloads = [load_json(path) for path in org_license_paths]
+    coverage_total = len(org_license_payloads)
+    coverage_ok = sum(
+        1
+        for payload in org_license_payloads
+        if isinstance(payload, dict) and not payload.get("error")
+    )
+    current_license_count = (
+        len(licensing_data.get("licenses", []))
+        if isinstance(licensing_data, dict) and isinstance(licensing_data.get("licenses"), list)
+        else 0
+    )
+    if isinstance(licensing_data, dict) and licensing_data.get("error"):
+        licensing_scope_note = "Licensing data unavailable for this organization."
+    elif licensing_mode:
+        licensing_scope_note = (
+            f"Licensing is reported at the organization level for this environment ({licensing_mode} model); "
+            "Meraki does not expose a true per-network license inventory in this dataset."
+        )
+    else:
+        licensing_scope_note = (
+            "Licensing scope could not be determined from the current payload. Treat this section as partial until the collection path is validated."
+        )
     license_rows_html = ""
     if isinstance(licensing_data, dict) and licensing_data:
         for lic_key, lic_val in licensing_data.items():
@@ -3207,6 +3237,15 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
          co-termination gaps can result in devices losing Dashboard management and some
          security features. Review expiration dates and plan renewals at least 90 days
          in advance.</p>
+      <div class="summary-card">
+        <div class="summary-title">Licensing Scope &amp; Coverage</div>
+        <div class="summary-body">
+          { _he(licensing_scope_note) }
+          <br><br>
+          Coverage across locally available org backups: <strong>{coverage_ok}/{coverage_total}</strong>.
+          Current org license records captured: <strong>{current_license_count}</strong>.
+        </div>
+      </div>
       {licensing_table}
       <div class="summary-card">
         <div class="summary-title">Licensing Best Practices</div>
