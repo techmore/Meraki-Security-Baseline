@@ -833,16 +833,56 @@ def _switch_anchor(serial: str, name: str) -> str:
     return f"switch-{base}"
 
 
-def _render_switch_port_grid(ports: List[Dict[str, Any]]) -> str:
+def _port_sort_key(port_id: Any) -> Tuple[int, int, str]:
+    text = str(port_id or "")
+    nums = [int(part) for part in re.findall(r"\d+", text)]
+    primary = nums[-1] if nums else 0
+    secondary = nums[-2] if len(nums) > 1 else 0
+    return (secondary, primary, text)
+
+
+def _port_group_label(port_id: Any) -> str:
+    text = str(port_id or "")
+    if "_" in text:
+        return text.rsplit("_", 1)[0]
+    return "Front Panel"
+
+
+def _port_role_short(role: str) -> str:
+    mapping = {
+        "Uplink": "UP",
+        "Downlink": "DN",
+        "Access point": "AP",
+        "Phone": "PH",
+        "Camera": "CAM",
+        "Voice endpoint": "VOI",
+        "Access": "ACC",
+        "Trunk": "TRK",
+        "Endpoint": "END",
+        "Unknown": "UNK",
+    }
+    return mapping.get(role, role[:3].upper())
+
+
+def _render_switch_port_grid(
+    ports: List[Dict[str, Any]],
+    port_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+    serial_to_dev: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> str:
     if not ports:
         return '<div class="switch-detail-grid-empty">No port telemetry available.</div>'
-    cells = []
-    for port in sorted(ports, key=lambda item: (0, int(str(item.get("portId", "0")).split("/")[0])) if str(item.get("portId", "")).isdigit() else (1, str(item.get("portId", "")))):
+    grouped: Dict[str, List[str]] = {}
+    counts = {"uplink": 0, "downlink": 0, "endpoint": 0, "unused": 0}
+    port_configs = port_configs or {}
+    serial_to_dev = serial_to_dev or {}
+    for port in sorted(ports, key=lambda item: _port_sort_key(item.get("portId"))):
+        port_id = str(port.get("portId") or "?")
         status = str(port.get("status") or "").lower()
         speed = str(port.get("speed") or "")
         errors = port.get("errors") or []
         if isinstance(errors, str):
             errors = [errors]
+        role = _port_role_label(port, port_configs.get(port_id), serial_to_dev)
         if errors:
             cls = "issue"
         elif port.get("isUplink"):
@@ -855,10 +895,45 @@ def _render_switch_port_grid(ports: List[Dict[str, Any]]) -> str:
             cls = "poe"
         else:
             cls = "ok"
-        cells.append(
-            f'<div class="switch-port-cell {cls}"><span>{_he(str(port.get("portId") or "?"))}</span></div>'
+        if cls == "uplink":
+            counts["uplink"] += 1
+        elif role == "Downlink":
+            counts["downlink"] += 1
+        elif cls == "down":
+            counts["unused"] += 1
+        else:
+            counts["endpoint"] += 1
+        speed_label = "1G"
+        if speed.startswith("10 "):
+            speed_label = "10M"
+        elif speed.startswith("100 "):
+            speed_label = "100M"
+        elif speed.startswith("2.5 "):
+            speed_label = "2.5G"
+        elif speed.startswith("5 "):
+            speed_label = "5G"
+        elif speed.startswith("10 G"):
+            speed_label = "10G"
+        grouped.setdefault(_port_group_label(port_id), []).append(
+            f'<div class="switch-port-cell {cls}" title="{_he(port_id)} - { _he(role) }">'
+            f'<span class="switch-port-num">{_he(port_id)}</span>'
+            f'<span class="switch-port-meta">{_he(_port_role_short(role))} { _he(speed_label) if status and cls != "down" else "" }</span>'
+            f"</div>"
         )
-    return f'<div class="switch-port-grid">{"".join(cells)}</div>'
+    summary = (
+        '<div class="switch-port-summary">'
+        f'<span><strong>{counts["uplink"]}</strong> uplink</span>'
+        f'<span><strong>{counts["downlink"]}</strong> downlink</span>'
+        f'<span><strong>{counts["endpoint"]}</strong> edge</span>'
+        f'<span><strong>{counts["unused"]}</strong> down</span>'
+        '</div>'
+    )
+    groups_html = []
+    for label, cells in grouped.items():
+        groups_html.append(
+            f'<div class="switch-port-group"><div class="switch-port-group-title">{_he(label)}</div><div class="switch-port-grid">{"".join(cells)}</div></div>'
+        )
+    return summary + "".join(groups_html)
 
 
 def _build_switch_detail_section(
@@ -1014,7 +1089,7 @@ def _build_switch_detail_section(
       </div>
       <div class="switch-detail-card">
         <div class="summary-title">Port Map</div>
-        {_render_switch_port_grid(ports)}
+        {_render_switch_port_grid(ports, port_configs, serial_to_dev)}
         <div class="switch-detail-legend">
           <span><i class="swatch ok"></i>healthy</span>
           <span><i class="swatch uplink"></i>uplink</span>
@@ -2653,16 +2728,50 @@ def build_html(doc_title: str, body: str) -> str:
       gap: 6px;
       margin-top: 10px;
     }}
+    .switch-port-summary {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--muted);
+      margin: 2px 0 12px;
+    }}
+    .switch-port-group {{
+      margin-top: 12px;
+    }}
+    .switch-port-group-title {{
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 7px;
+      font-weight: 700;
+    }}
     .switch-port-cell {{
       border-radius: 6px;
-      min-height: 32px;
+      min-height: 40px;
       display: flex;
       align-items: center;
       justify-content: center;
+      flex-direction: column;
+      gap: 2px;
       font-size: 10px;
       font-weight: 700;
       border: 1px solid transparent;
       color: #1f2937;
+      padding: 4px 2px;
+      text-align: center;
+    }}
+    .switch-port-num {{
+      display: block;
+      line-height: 1.05;
+    }}
+    .switch-port-meta {{
+      display: block;
+      font-size: 8px;
+      font-weight: 600;
+      opacity: 0.78;
+      line-height: 1.05;
     }}
     .switch-port-cell.ok {{ background: #e5efe5; border-color: #b7d2b7; }}
     .switch-port-cell.uplink {{ background: #dbeafe; border-color: #93c5fd; }}
