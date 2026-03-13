@@ -52,10 +52,32 @@ pip install -r requirements.txt
 
 ## Development
 
-Use `sample_data/` for anonymised fixtures. Run the report generator directly against a backup directory for fast iteration:
+For local iteration without live Meraki access, use the committed fixture set in
+`tests/fixtures/`.
+
+Generate a report directly from fixture data:
 
 ```bash
-python report_generator.py
+python3 - <<'PY'
+from reporting.app import build_org_report
+from reporting.html_shell import build_html
+
+body = build_org_report("tests/fixtures", "Fixture Org")
+print(build_html("Fixture Org — Network Health Report", body)[:400])
+PY
+```
+
+Run the script entrypoint against existing backups:
+
+```bash
+python3 scripts/generate_report.py
+./run.sh --report-only --no-ai-review
+```
+
+Run tests:
+
+```bash
+pytest -q
 ```
 
 ## License
