@@ -1271,6 +1271,7 @@ def _build_ap_interference_section(
     devices_by_network: Dict[str, Dict[str, Any]],
     channel_util: Any,
     wireless_stats: Dict[str, Any],
+    switch_port_statuses_by_switch: Dict[str, Any],
 ) -> str:
     if not isinstance(channel_util, list):
         return """
@@ -1425,6 +1426,64 @@ def _build_ap_interference_section(
         per_ap_rows,
         key=lambda item: (-item["worst_non_wifi"], -item["worst_total"], item["site"], item["name"]),
     )
+    switch_ap_links: Dict[str, List[Dict[str, Any]]] = {}
+    for switch_serial, ports in switch_port_statuses_by_switch.items() if isinstance(switch_port_statuses_by_switch, dict) else []:
+        if not isinstance(ports, list):
+            continue
+        for port in ports:
+            if not isinstance(port, dict):
+                continue
+            for key in ("lldp", "cdp"):
+                disc = port.get(key)
+                if not isinstance(disc, dict):
+                    continue
+                neighbor_id = str(disc.get("chassisId") or disc.get("deviceId") or "").lower()
+                for ap in hot_aps:
+                    ap_mac = str(ap_by_serial.get(ap["serial"], {}).get("mac") or "").lower().replace(":", "")
+                    if ap_mac and ap_mac in neighbor_id.replace(":", ""):
+                        switch_ap_links.setdefault(switch_serial, []).append(
+                            {
+                                "switch_port": str(port.get("portId") or "?"),
+                                "ap": ap,
+                            }
+                        )
+                        break
+    ap_deep_dive_parts = []
+    for switch_serial, linked in sorted(switch_ap_links.items(), key=lambda item: len(item[1]), reverse=True):
+        linked_sorted = sorted(
+            linked,
+            key=lambda item: (
+                {"High": 0, "Medium": 1, "Low": 2}.get(item["ap"]["severity"], 3),
+                -item["ap"]["worst_non_wifi"],
+                item["switch_port"],
+            ),
+        )
+        rows = "".join(
+            "<tr>"
+            f"<td>{_he(item['switch_port'])}</td>"
+            f"<td>{_he(item['ap']['name'])}</td>"
+            f"<td><span class=\"{item['ap']['severity_cls']}\">{_he(item['ap']['severity'])}</span></td>"
+            f"<td>{_he(item['ap']['band'])} GHz</td>"
+            f"<td>{item['ap']['worst_non_wifi']:.1f}%</td>"
+            f"<td>{item['ap']['worst_total']:.1f}%</td>"
+            f"<td>{item['ap']['assoc']}</td>"
+            f"<td>{_he('; '.join(item['ap']['findings']))}</td>"
+            "</tr>"
+            for item in linked_sorted[:20]
+        )
+        ap_deep_dive_parts.append(
+            f"""
+      <div class="building-section">
+        <h3>{_he(switch_serial)}</h3>
+        <table class="data">
+          <thead>
+            <tr><th>Switch Port</th><th>AP</th><th>Severity</th><th>Worst Band</th><th>Non-WiFi</th><th>Total</th><th>Assoc</th><th>AP Findings</th></tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+            """
+        )
     ap_findings_rows = "".join(
         "<tr>"
         f"<td>{_he(item['site'])}</td>"
@@ -1483,6 +1542,8 @@ def _build_ap_interference_section(
         <div class="summary-title">RF Recommendations</div>
         <div class="summary-body"><ul>{''.join(f'<li>{_he(item)}</li>' for item in recommendations)}</ul></div>
       </div>
+      <h2>AP Deep Dive By Switch</h2>
+      {''.join(ap_deep_dive_parts) if ap_deep_dive_parts else '<div class="summary-card"><div class="summary-body">AP-to-switch mapping was not available in the current telemetry, so AP deep dives could not yet be grouped by switch.</div></div>'}
       <h2>Diagnostic Dump</h2>
       <table class="data">
         <thead>
@@ -1870,6 +1931,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         devices_by_network,
         channel_util,
         wireless_stats,
+        switch_port_statuses_by_switch,
     )
     wan_capacity_html = _build_wan_capacity_section(
         uplink_statuses,
