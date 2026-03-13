@@ -2003,6 +2003,224 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     </section>
     """
 
+    # =========================================================
+    # SECTION 14: UNIFI COMPARISON & REFRESH PLANNING
+    # =========================================================
+    # Heuristic model mapping: Meraki family -> UniFi equivalent + indicative USD street price
+    # Prices are published MSRP / street estimates (2025–2026) and carry a planning-only disclaimer.
+    _UNIFI_MAP = {
+        # MX appliances -> UniFi Dream Machine / Cloud Gateway
+        "MX68":   ("UDM SE",          1_299,  649),
+        "MX75":   ("UCG-Ultra",        599,   299),
+        "MX85":   ("UDM Pro Max",    1_999,  899),
+        "MX95":   ("UDM Pro Max",    1_999,  899),
+        "MX105":  ("UDM Pro SE",     1_499,  699),
+        "MX250":  ("UCG-Enterprise", 3_999, 1_799),
+        "MX450":  ("UCG-Enterprise", 3_999, 1_799),
+        # MS switches -> UniFi USW Pro / Aggregation
+        "MS120":  ("USW Lite 16 PoE",  349,   179),
+        "MS125":  ("USW Pro 24 PoE",   849,   549),
+        "MS210":  ("USW Pro 24",       649,   399),
+        "MS220":  ("USW Pro 24",       649,   399),
+        "MS225":  ("USW Pro 24 PoE",   849,   549),
+        "MS250":  ("USW Pro 48 PoE", 1_299,   799),
+        "MS320":  ("USW Pro Aggregation", 999, 699),
+        "MS350":  ("USW Enterprise 24 PoE", 1_299, 899),
+        "MS390":  ("USW Enterprise 48 PoE", 1_799, 1_199),
+        "MS410":  ("USW Aggregation",  799,   499),
+        "MS420":  ("USW Aggregation",  799,   499),
+        "MS425":  ("USW Pro Aggregation", 999, 699),
+        "MS450":  ("USW Pro Aggregation", 999, 699),
+        # MR access points -> UniFi U6 / U7 series
+        "MR18":   ("U6 Lite",        199,   109),
+        "MR20":   ("U6 Lite",        199,   109),
+        "MR28":   ("U6 Mesh",        199,   129),
+        "MR30":   ("U6 LR",          299,   169),
+        "MR33":   ("U6 LR",          299,   169),
+        "MR36":   ("U6 Pro",         349,   189),
+        "MR42":   ("U6 Pro",         349,   189),
+        "MR44":   ("U7 Pro",         499,   299),
+        "MR46":   ("U7 Pro",         499,   299),
+        "MR46E":  ("U7 Pro Max",     699,   449),
+        "MR52":   ("U7 Pro Max",     699,   449),
+        "MR55":   ("U7 Pro Max",     699,   449),
+        "MR56":   ("U7 Pro Max",     699,   449),
+        "MR57":   ("U7 Pro Max",     699,   449),
+        "MR70":   ("U6 Mesh",        199,   129),
+        "MR74":   ("U6 Mesh Pro",    299,   179),
+        "MR76":   ("U7 Outdoor",     499,   299),
+        "MR84":   ("U7 Pro Max",     699,   449),
+        "MR86":   ("U7 Outdoor",     499,   299),
+    }
+
+    _unifi_rows = ""
+    _meraki_total = 0
+    _unifi_total  = 0
+    _eol_swap_meraki = 0
+    _eol_swap_unifi  = 0
+
+    for _model, _count in top_models:
+        _mprefix = str(_model).upper()
+        _map_key = next(
+            (k for k in _UNIFI_MAP if _mprefix.startswith(k)),
+            None,
+        )
+        if not _map_key:
+            continue
+        _unifi_name, _meraki_price, _unifi_price = _UNIFI_MAP[_map_key]
+        _is_eol = any(_mprefix.startswith(p) for p in _EOL_PREFIXES)
+        _row_mx  = _meraki_price * _count
+        _row_ux  = _unifi_price  * _count
+        _meraki_total += _row_mx
+        _unifi_total  += _row_ux
+        if _is_eol:
+            _eol_swap_meraki += _row_mx
+            _eol_swap_unifi  += _row_ux
+        _unifi_rows += (
+            f"<tr>"
+            f"<td>{_he(_model)}</td>"
+            f"<td>{_count}</td>"
+            f"<td>{_he(_unifi_name)}</td>"
+            f"<td>${_meraki_price:,}</td>"
+            f"<td>${_unifi_price:,}</td>"
+            f"<td>${_row_mx:,}</td>"
+            f"<td>${_row_ux:,}</td>"
+            f'<td>{"⚠ EOL" if _is_eol else "—"}</td>'
+            f"</tr>"
+        )
+
+    _savings = _meraki_total - _unifi_total
+    _savings_pct = round(100 * _savings / _meraki_total) if _meraki_total else 0
+
+    if _unifi_rows:
+        _unifi_hw_table = f"""
+        <table class="data dense">
+          <thead>
+            <tr>
+              <th>Meraki Model</th><th>Qty</th><th>UniFi Equivalent</th>
+              <th>Meraki Unit (est.)</th><th>UniFi Unit (est.)</th>
+              <th>Meraki Total</th><th>UniFi Total</th><th>Flag</th>
+            </tr>
+          </thead>
+          <tbody>{_unifi_rows}</tbody>
+          <tfoot>
+            <tr>
+              <td colspan="5"><strong>Hardware totals (mapped devices only)</strong></td>
+              <td><strong>${_meraki_total:,}</strong></td>
+              <td><strong>${_unifi_total:,}</strong></td>
+              <td><strong>−{_savings_pct}%</strong></td>
+            </tr>
+          </tfoot>
+        </table>"""
+    else:
+        _unifi_hw_table = (
+            '<div class="summary-card"><div class="summary-body">'
+            "No device models in this inventory matched the UniFi comparison table. "
+            "Verify model names in inventory_summary.json."
+            "</div></div>"
+        )
+
+    unifi_html = f"""
+    <section id="unifi-comparison" class="report-section">
+      <h1>14. UniFi Comparison &amp; Refresh Planning</h1>
+      <p>This section provides a heuristic cost comparison between the current Meraki
+         environment and a notional UniFi replacement. It is a planning estimate only — not
+         a procurement quote or a recommendation to replace. Prices are approximate 2025–2026
+         street/MSRP estimates and will vary by reseller, volume, and configuration.
+         <strong>Always validate with current partner pricing before presenting externally.</strong></p>
+
+      <div class="summary-card">
+        <div class="summary-title">Planning Summary</div>
+        <div class="summary-body">
+          Mapped devices: {len([r for r in top_models if any(str(r[0]).upper().startswith(k) for k in _UNIFI_MAP)])} model type(s)
+          · Meraki hardware estimate: <strong>${_meraki_total:,}</strong>
+          · UniFi hardware estimate: <strong>${_unifi_total:,}</strong>
+          · Estimated hardware delta: <strong>${_savings:,} ({_savings_pct}% lower)</strong>
+          {f"· EOL devices (hardware only): Meraki <strong>${_eol_swap_meraki:,}</strong> vs UniFi <strong>${_eol_swap_unifi:,}</strong>" if _eol_swap_meraki else ""}
+          <br><br>
+          <em>Note: Meraki hardware prices above do not include annual licensing (typically
+          $X–$Y per device per year for Enterprise tier). UniFi has no recurring per-device
+          subscription fees beyond optional UniFi OS Cloud (optional, ~$29/mo for remote management).</em>
+        </div>
+      </div>
+
+      {_unifi_hw_table}
+
+      <h2>Licensing &amp; Support Model Comparison</h2>
+      <table class="data">
+        <thead>
+          <tr><th>Factor</th><th>Cisco Meraki</th><th>Ubiquiti UniFi</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Licensing model</strong></td>
+            <td>Mandatory annual per-device license (co-term or Enterprise Agreement).
+                Devices enter limited mode without active license.</td>
+            <td>No per-device license fees. Hardware purchased once. Optional cloud
+                management subscription (~$29/mo).</td>
+          </tr>
+          <tr>
+            <td><strong>Management platform</strong></td>
+            <td>Meraki Dashboard (cloud-only SaaS). Full-featured, zero on-prem required.
+                Dashboard unavailable without internet or during Meraki outages.</td>
+            <td>UniFi Network Application (self-hosted on UDM or Linux server, or UniFi Cloud).
+                Can operate fully on-prem without internet dependency.</td>
+          </tr>
+          <tr>
+            <td><strong>Security features</strong></td>
+            <td>AMP, IDS/IPS, content filtering, SD-WAN, AutoVPN — Enterprise tier required
+                for full threat protection.</td>
+            <td>IDS/IPS (Teleport, basic), content filtering (limited), no SD-WAN.
+                Security depth is lower on MX-equivalent features.</td>
+          </tr>
+          <tr>
+            <td><strong>Wireless</strong></td>
+            <td>Strong enterprise RF management, auto-channel, airtime fairness, band steering.
+                Mature roaming (802.11r/k/v) across all current MR models.</td>
+            <td>Strong Wi-Fi 6/6E hardware. RF management improving but less mature than Meraki
+                in dense multi-AP environments. Roaming support improving in newer firmware.</td>
+          </tr>
+          <tr>
+            <td><strong>Switching</strong></td>
+            <td>Full cloud-managed stack with per-port telemetry, STP, ACLs, QoS, LACP.
+                Excellent visibility. PoE budget management strong.</td>
+            <td>Comparable L2/L3 feature set at lower cost. STP, ACLs, LACP, VLAN, QoS.
+                Less real-time telemetry granularity in cloud view.</td>
+          </tr>
+          <tr>
+            <td><strong>Lifecycle / support</strong></td>
+            <td>Firmware delivered via Dashboard; end-of-support dates published.
+                TAC support included with license. Hardware warranty separate.</td>
+            <td>Firmware self-managed (auto-update configurable). Community forums primary
+                support channel; hardware warranty typically 1 year.</td>
+          </tr>
+          <tr>
+            <td><strong>Migration complexity</strong></td>
+            <td colspan="2">Full replacement requires re-cabling where physical form factor differs,
+                VLAN/SSID reconfiguration, staff retraining, and thorough parallel-run testing.
+                Budget 20–30% of hardware cost for professional services on a full migration.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Recommendation</h2>
+      <div class="summary-card">
+        <div class="summary-body">
+          {"<strong>EOL hardware refresh is the most pressing decision.</strong> The " + str(len(_eol_models)) + " EOL model(s) identified (" + ", ".join(_eol_models[:4]) + ") represent the highest-risk devices. Whether they are refreshed with new Meraki hardware or replaced with an alternative platform, they should exit production within the next 12–18 months." if _eol_models else "<strong>No EOL hardware was flagged.</strong> The refresh decision is less time-pressured."}
+          <br><br>
+          If the primary driver is licensing cost reduction, a phased migration starting with
+          access switching and APs (lowest migration complexity) can deliver savings without
+          replacing edge appliances. If operational simplicity and feature parity are priorities,
+          retaining Meraki at the edge and evaluating UniFi for access-layer devices is a
+          common hybrid approach.
+          <br><br>
+          Any migration decision should be preceded by a formal RFP or vendor evaluation
+          incorporating current pricing, professional services scope, and a pilot deployment.
+        </div>
+      </div>
+    </section>
+    """
+
     return (
         cover_html
         + _schema_banner
@@ -2021,6 +2239,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         + ap_interference_html
         + client_analysis_html
         + switch_deep_dive_html
+        + unifi_html
     )
 
 def main() -> int:
