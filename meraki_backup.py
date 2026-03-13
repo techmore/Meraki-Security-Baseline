@@ -23,6 +23,13 @@ BACKUPS_DIR       = os.path.join(BASE_DIR, "backups")
 _REQUEST_TIMEOUT  = int(os.getenv("MERAKI_REQUEST_TIMEOUT", "30"))   # seconds per call
 _MAX_RETRIES      = int(os.getenv("MERAKI_MAX_RETRIES",     "5"))    # 429 retries
 
+# ── Timespan / pagination constants ─────────────────────────────────────────
+TIMESPAN_1H   =   3_600   # seconds
+TIMESPAN_24H  =  86_400   # seconds
+TIMESPAN_7D   = 604_800   # seconds
+PER_PAGE_DEFAULT = 500
+PER_PAGE_EVENTS  = 100
+
 
 def _org_slug(name: str) -> str:
     """Turn an org display name into a safe directory name, e.g. 'Acme Corp' → 'Acme_Corp'."""
@@ -94,7 +101,7 @@ def _parse_link_header(link: Optional[str]) -> Dict[str, str]:
 
 def paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:
     params = params or {}
-    params.setdefault("perPage", 500)
+    params.setdefault("perPage", PER_PAGE_DEFAULT)
     url: Optional[str] = f"{API_BASE}{path}?{urllib.parse.urlencode(params, doseq=True)}"
     all_items: List[Any] = []
     retry_count = 0
@@ -425,7 +432,7 @@ def summarize_ap_clients(clients_by_network: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def summarize_poe_power(port_statuses: Dict[str, List[Dict[str, Any]]], timespan_seconds: int) -> Dict[str, Any]:
-    hours = max(timespan_seconds / 3600.0, 1.0)
+    hours = max(timespan_seconds / TIMESPAN_1H, 1.0)
     switch_totals = []
     port_totals = []
     for serial, ports in port_statuses.items():
@@ -1014,7 +1021,7 @@ def main() -> int:
                 if idx == 1 or idx % 10 == 0 or idx == len(switches):
                     log_line(log_f, "INFO", f"Switch port progress for {org_name}: {idx}/{len(switches)} ({serial})")
                 try:
-                    statuses = paged_get(f"/devices/{serial}/switch/ports/statuses", api_key, params={"timespan": 86400})
+                    statuses = paged_get(f"/devices/{serial}/switch/ports/statuses", api_key, params={"timespan": TIMESPAN_24H})
                     port_statuses[serial] = statuses
                 except Exception as e:
                     port_statuses[serial] = [{"error": str(e)}]
@@ -1059,7 +1066,7 @@ def main() -> int:
                 stats, err = safe_paged_get(
                     f"/networks/{net_id}/wireless/devices/connectionStats",
                     api_key,
-                    params={"timespan": 604800},
+                    params={"timespan": TIMESPAN_7D},
                 )
                 wireless_connection_stats[net_id] = stats if not err else {"error": err}
                 if err:
@@ -1068,7 +1075,7 @@ def main() -> int:
                 mesh, err = safe_get_one(
                     f"/networks/{net_id}/wireless/meshStatuses",
                     api_key,
-                    params={"timespan": 86400},
+                    params={"timespan": TIMESPAN_24H},
                 )
                 wireless_mesh_statuses[net_id] = mesh if not err else {"error": err}
                 if err:
@@ -1078,7 +1085,7 @@ def main() -> int:
                 overview, err = safe_get_one(
                     f"/networks/{net_id}/clients/overview",
                     api_key,
-                    params={"timespan": 86400},
+                    params={"timespan": TIMESPAN_24H},
                 )
                 clients_overview[net_id] = overview if not err else {"error": err}
                 if err:
@@ -1104,7 +1111,7 @@ def main() -> int:
                 w_clients, err = safe_paged_get(
                     f"/networks/{net_id}/wireless/clients",
                     api_key,
-                    params={"timespan": 3600},
+                    params={"timespan": TIMESPAN_1H},
                 )
                 wireless_clients[net_id] = w_clients if not err else {"error": err}
                 if err:
@@ -1122,7 +1129,7 @@ def main() -> int:
                 alerts, err = safe_paged_get(
                     f"/networks/{net_id}/alerts/history",
                     api_key,
-                    params={"perPage": 100},
+                    params={"perPage": PER_PAGE_EVENTS},
                 )
                 alerts_history[net_id] = alerts if not err else {"error": err}
                 if err:
@@ -1190,7 +1197,7 @@ def main() -> int:
             rf_summary = summarize_rf_profiles(wireless_rf_profiles)
             ap_client_summary = summarize_ap_clients(wireless_clients)
             switch_findings = recommend_switch_ports(port_statuses, port_configs)
-            poe_summary = summarize_poe_power(port_statuses, 86400)
+            poe_summary = summarize_poe_power(port_statuses, TIMESPAN_24H)
             channel_utilization, err = safe_get_one(
                 f"/organizations/{org_id}/wireless/devices/channelUtilization/byDevice",
                 api_key,

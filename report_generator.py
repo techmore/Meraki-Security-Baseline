@@ -255,275 +255,484 @@ def _topo_svg(
     lldp_cdp: Dict,
     ap_util: Dict,
     port_issues: Dict,
+    switch_port_statuses_by_switch: Dict[str, Any],
 ) -> str:
-    """Return an inline SVG topology ordered by true packet-flow depth from the internet.
-
-    Uses BFS from MX appliances over the LLDP/CDP adjacency graph to assign each
-    device its real hop-depth (Internet=0, MX=1, directly-attached switches=2, …).
-    Devices unreachable via LLDP fall back to a type-based default depth so they
-    still appear in a sensible position even without neighbour data.
-    """
-    from collections import deque
-
+    """Return an inline SVG topology using parent/child relationships from ports."""
     if not devices:
         return ""
 
-    # ── Build bidirectional LLDP/CDP adjacency ───────────────────────────────
-    serial_to_dev: Dict[str, Dict] = {
+    node_w = 196
+    node_h = 108
+    layer_gap = 104
+    col_gap = 20
+    pad_x = 28
+    pad_y = 26
+
+    def _norm(value: Any) -> str:
+        return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+    def _port_sort_key(value: Any) -> Tuple[int, str]:
+        text = str(value)
+        m = re.match(r"(\d+)", text)
+        if m:
+            return (0, f"{int(m.group(1)):05d}{text}")
+        return (1, text)
+
+    serial_to_dev: Dict[str, Dict[str, Any]] = {
         d["serial"]: d for d in devices if d.get("serial")
     }
-    known = set(serial_to_dev)
-    adj: Dict[str, set] = {s: set() for s in known}
+    if not serial_to_dev:
+        return ""
 
-    if isinstance(lldp_cdp, dict):
-        for serial, data in lldp_cdp.items():
-            if serial not in known or not isinstance(data, dict):
+    id_to_serial: Dict[str, str] = {}
+    for serial, dev in serial_to_dev.items():
+        id_to_serial[_norm(serial)] = serial
+        if dev.get("mac"):
+            id_to_serial[_norm(dev.get("mac"))] = serial
+
+    status_by_switch: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if isinstance(switch_port_statuses_by_switch, dict):
+        for serial, ports in switch_port_statuses_by_switch.items():
+            if isinstance(ports, list):
+                status_by_switch[serial] = {
+                    str(p.get("portId")): p for p in ports if isinstance(p, dict)
+                }
+
+    links: List[Dict[str, Any]] = []
+    link_seen: set = set()
+    for local_serial, data in lldp_cdp.items() if isinstance(lldp_cdp, dict) else []:
+        if local_serial not in serial_to_dev or not isinstance(data, dict):
+            continue
+        ports = data.get("ports", {})
+        if not isinstance(ports, dict):
+            continue
+        for local_port, port_data in ports.items():
+            if not isinstance(port_data, dict):
                 continue
-            ports = data.get("ports", {})
-            port_items: Any = (
-                ports.values() if isinstance(ports, dict)
-                else ports if isinstance(ports, list)
-                else []
-            )
-            for pd in port_items:
-                if not isinstance(pd, dict):
+            candidates = []
+            for key in ("lldp", "cdp"):
+                disc = port_data.get(key)
+                if isinstance(disc, dict):
+                    candidates.append(disc)
+            for disc in candidates:
+                target_serial = None
+                for candidate in (
+                    disc.get("chassisId"),
+                    disc.get("deviceId"),
+                    port_data.get("deviceMac"),
+                ):
+                    target_serial = id_to_serial.get(_norm(candidate))
+                    if target_serial:
+                        break
+                if not target_serial or target_serial == local_serial:
                     continue
-                # Shape A: {lldpDiscoveries:[…], cdpDiscoveries:[…]}
-                for disc in pd.get("lldpDiscoveries", []) + pd.get("cdpDiscoveries", []):
-                    if isinstance(disc, dict):
-                        cid = disc.get("chassisId", "") or disc.get("deviceId", "")
-                        if cid and cid in known and cid != serial:
-                            adj[serial].add(cid)
-                            adj[cid].add(serial)
-                # Shape B: {lldp:{chassisId:…}, cdp:{deviceId:…}}
-                for key in ("lldp", "cdp"):
-                    disc = pd.get(key)
-                    if isinstance(disc, dict):
-                        cid = disc.get("chassisId", "") or disc.get("deviceId", "")
-                        if cid and cid in known and cid != serial:
-                            adj[serial].add(cid)
-                            adj[cid].add(serial)
+                dedupe = (local_serial, str(local_port), target_serial)
+                if dedupe in link_seen:
+                    continue
+                link_seen.add(dedupe)
+                local_status = status_by_switch.get(local_serial, {}).get(str(local_port), {})
+                links.append(
+                    {
+                        "local": local_serial,
+                        "local_port": str(local_port),
+                        "local_is_uplink": bool(local_status.get("isUplink")),
+                        "local_speed": str(local_status.get("speed") or ""),
+                        "remote": target_serial,
+                        "remote_port": str(disc.get("portId") or ""),
+                        "system_name": disc.get("systemName") or "",
+                        "confirmed": True,
+                    }
+                )
 
-    # ── BFS from MX appliances to assign packet-flow depth ───────────────────
-    # MX = depth 1 (Internet is depth 0 — a virtual node)
-    _type_default = {"appliance": 1, "switch": 2, "wireless": 3, "camera": 3, "sensor": 4}
-    _type_order   = {"appliance": 0, "switch": 1, "wireless": 2, "camera": 3, "sensor": 4}
+    node_info: Dict[str, Dict[str, Any]] = {}
+    children: Dict[str, List[str]] = {}
+    parent_of: Dict[str, str] = {}
+    parent_link_of: Dict[str, Dict[str, Any]] = {}
+
+    def _upstream_rank(serial: str) -> int:
+        dev = serial_to_dev[serial]
+        if dev.get("productType") == "appliance":
+            return 1000
+        ports = status_by_switch.get(serial, {})
+        port_count = len(ports)
+        uplinks = sum(1 for p in ports.values() if p.get("isUplink"))
+        ten_g = sum(1 for p in ports.values() if "10 Gbps" in str(p.get("speed") or ""))
+        return 400 + ten_g * 20 + uplinks * 5 + port_count
+
+    for serial, dev in serial_to_dev.items():
+        node_info[serial] = {
+            "serial": serial,
+            "type": dev.get("productType", "switch"),
+            "status": dev.get("status", "unknown"),
+            "label": (dev.get("name") or dev.get("model") or serial)[:22],
+            "model": dev.get("model", ""),
+            "ports": sorted(status_by_switch.get(serial, {}).values(), key=lambda p: _port_sort_key(p.get("portId"))),
+        }
+
+    candidate_parents: Dict[str, List[Tuple[int, str, Dict[str, Any]]]] = {}
+    for link in links:
+        left = serial_to_dev[link["local"]]
+        right = serial_to_dev[link["remote"]]
+        ltype = left.get("productType")
+        rtype = right.get("productType")
+
+        child = ""
+        parent = ""
+        score = 0
+        if link["local_is_uplink"] and rtype in ("switch", "appliance"):
+            child, parent, score = link["local"], link["remote"], 100
+        elif ltype == "appliance" and rtype != "appliance":
+            child, parent, score = link["remote"], link["local"], 90
+        elif rtype == "appliance" and ltype != "appliance":
+            child, parent, score = link["local"], link["remote"], 90
+        elif ltype == "switch" and rtype in ("wireless", "camera", "sensor"):
+            child, parent, score = link["remote"], link["local"], 80
+        elif rtype == "switch" and ltype in ("wireless", "camera", "sensor"):
+            child, parent, score = link["local"], link["remote"], 80
+        elif ltype == "switch" and rtype == "switch":
+            if _upstream_rank(link["local"]) >= _upstream_rank(link["remote"]):
+                child, parent, score = link["remote"], link["local"], 60
+            else:
+                child, parent, score = link["local"], link["remote"], 60
+
+        if child and parent and child != parent:
+            candidate_parents.setdefault(child, []).append((score, parent, link))
+
+    for child, options in candidate_parents.items():
+        options.sort(key=lambda item: (-item[0], -_upstream_rank(item[1]), item[1]))
+        _, parent, link = options[0]
+        parent_of[child] = parent
+        parent_link_of[child] = link
+        children.setdefault(parent, []).append(child)
+
+    roots = [
+        serial for serial, dev in serial_to_dev.items()
+        if dev.get("productType") == "appliance" and serial not in parent_of
+    ]
+    if not roots:
+        roots = [
+            serial for serial, dev in serial_to_dev.items()
+            if dev.get("productType") == "switch" and serial not in parent_of
+        ]
+    if not roots:
+        roots = [next(iter(serial_to_dev))]
 
     depth: Dict[str, int] = {}
-    queue: deque = deque()
-    for s, d in serial_to_dev.items():
-        if d.get("productType") == "appliance":
-            depth[s] = 1
-            queue.append(s)
 
-    while queue:
-        cur = queue.popleft()
-        for nb in adj[cur]:
-            if nb not in depth:
-                depth[nb] = depth[cur] + 1
-                queue.append(nb)
+    def _assign_depth(serial: str, value: int) -> None:
+        if serial in depth and depth[serial] <= value:
+            return
+        depth[serial] = value
+        for child in children.get(serial, []):
+            _assign_depth(child, value + 1)
 
-    # Devices not reached by BFS get a sensible type-based default
-    for s, d in serial_to_dev.items():
-        if s not in depth:
-            depth[s] = _type_default.get(d.get("productType", "switch"), 3)
+    for root in roots:
+        _assign_depth(root, 1)
+    for serial, dev in serial_to_dev.items():
+        if serial not in depth:
+            fallback = {"appliance": 1, "switch": 2, "wireless": 3, "camera": 3, "sensor": 4}
+            depth[serial] = fallback.get(dev.get("productType"), 3)
 
-    # ── Group devices into rows by depth ─────────────────────────────────────
-    by_depth: Dict[int, List[Dict]] = {}
-    for s, d in serial_to_dev.items():
-        by_depth.setdefault(depth[s], []).append(d)
+    display_serials = [
+        serial for serial, dev in serial_to_dev.items()
+        if dev.get("productType") in ("appliance", "switch")
+    ]
+    if not display_serials:
+        display_serials = list(serial_to_dev.keys())
 
-    # Sort within each row: by type priority, then name
-    for row in by_depth.values():
-        row.sort(key=lambda d: (
-            _type_order.get(d.get("productType", ""), 5),
-            d.get("name") or d.get("serial", ""),
+    by_depth: Dict[int, List[str]] = {}
+    type_order = {"appliance": 0, "switch": 1, "wireless": 2, "camera": 3, "sensor": 4}
+    for serial, value in depth.items():
+        if serial not in display_serials:
+            continue
+        by_depth.setdefault(value, []).append(serial)
+    for serials in by_depth.values():
+        serials.sort(key=lambda serial: (
+            type_order.get(serial_to_dev[serial].get("productType", ""), 9),
+            serial_to_dev[serial].get("name") or serial,
         ))
 
-    # Build ordered layers: Internet (virtual) at index 0, then by ascending depth
-    inet_node = {"s": "", "type": "internet", "status": "online",
-                 "label": "Internet", "model": ""}
+    layers: List[List[str]] = [["__internet__"]]
+    for value in sorted(by_depth):
+        layers.append(by_depth[value])
 
-    def _layer_nodes(devs: List[Dict]) -> List[Dict]:
-        out = []
-        for d in devs[:_TOPO_MAX]:
-            out.append({
-                "s":      d.get("serial", ""),
-                "type":   d.get("productType", "switch"),
-                "status": d.get("status", "unknown"),
-                "label":  (d.get("name") or d.get("model") or d.get("serial", ""))[:18],
-                "model":  d.get("model", ""),
-            })
-        ov = len(devs) - _TOPO_MAX
-        if ov > 0:
-            out.append({"s": "", "type": devs[0].get("productType", "switch"),
-                        "status": "stub", "label": f"+{ov} more", "model": ""})
-        return out
+    max_cols = max(len(layer) for layer in layers)
+    canvas_w = max_cols * (node_w + col_gap) - col_gap + 2 * pad_x
+    canvas_h = len(layers) * (node_h + layer_gap) - layer_gap + 2 * pad_y
+    positions: Dict[str, Tuple[float, float]] = {}
 
-    layers: List[List[Dict]] = [[inet_node]]
-    for dl in sorted(by_depth):
-        layers.append(_layer_nodes(by_depth[dl]))
+    for layer_index, layer in enumerate(layers):
+        row_w = len(layer) * (node_w + col_gap) - col_gap
+        x0 = (canvas_w - row_w) / 2
+        y = pad_y + layer_index * (node_h + layer_gap)
+        for idx, serial in enumerate(layer):
+            positions[serial] = (x0 + idx * (node_w + col_gap), y)
 
-    # serial → (layer_index, node_index) — needed for edge drawing
-    spos: Dict[str, Tuple[int, int]] = {}
-    for li, layer in enumerate(layers):
-        for ni, node in enumerate(layer):
-            if node.get("s"):
-                spos[node["s"]] = (li, ni)
-
-    # ── Canvas layout ─────────────────────────────────────────────────────────
-    nw, nh = _TOPO_NW, _TOPO_NH
-    max_n = max(len(L) for L in layers)
-    cw = max_n * (nw + _TOPO_HG) - _TOPO_HG + 2 * _TOPO_PX
-    ch = len(layers) * nh + (len(layers) - 1) * _TOPO_VG + 2 * _TOPO_PY
-
-    pos: List[List[Tuple[float, float]]] = []
-    for li, layer in enumerate(layers):
-        row_w = len(layer) * (nw + _TOPO_HG) - _TOPO_HG
-        x0 = (cw - row_w) / 2
-        y  = _TOPO_PY + li * (nh + _TOPO_VG)
-        pos.append([(x0 + ni * (nw + _TOPO_HG), y) for ni in range(len(layer))])
-
-    # ── SVG ───────────────────────────────────────────────────────────────────
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'width="{cw:.0f}" height="{ch:.0f}" '
-        f'viewBox="0 0 {cw:.0f} {ch:.0f}" '
-        f'style="font-family:Inter,sans-serif;background:#f8fafc;'
-        f'border-radius:10px;border:1px solid #e2e8f0;display:block;max-width:100%;">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w:.0f}" height="{canvas_h:.0f}" '
+        f'viewBox="0 0 {canvas_w:.0f} {canvas_h:.0f}" '
+        f'style="font-family:Inter,sans-serif;background:#f8fafc;border-radius:10px;'
+        f'border:1px solid #e2e8f0;display:block;max-width:100%;">'
     ]
 
-    # ── Edges ─────────────────────────────────────────────────────────────────
-    # Track which nodes already have an upward edge so we can add fallback dashes
-    has_upper_edge: set = set()
-    drawn_pairs: set = set()
     parts.append('<g fill="none">')
+    internet_x = positions["__internet__"][0] + node_w / 2
+    internet_y = positions["__internet__"][1] + node_h
+    for root in roots:
+        rx, ry = positions[root]
+        parts.append(
+            f'<line x1="{internet_x:.1f}" y1="{internet_y:.1f}" x2="{rx + node_w/2:.1f}" y2="{ry:.1f}" '
+            f'stroke="#c4c9b0" stroke-width="1.6" stroke-dasharray="4 3" opacity="0.8"/>'
+        )
 
-    # 1. Internet → every depth-1 device (always dashed; Internet has no LLDP serial)
-    if len(layers) > 1:
-        ix = pos[0][0][0] + nw / 2
-        iy = pos[0][0][1] + nh
-        for ni, node in enumerate(layers[1]):
-            tx = pos[1][ni][0] + nw / 2
-            ty = pos[1][ni][1]
-            parts.append(
-                f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{tx:.1f}" y2="{ty:.1f}" '
-                f'stroke="#c4c9b0" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.75"/>'
-            )
-            if node.get("s"):
-                has_upper_edge.add(node["s"])
-
-    # 2. LLDP-confirmed edges between devices — solid lines at exact positions
-    for s1, neighbors in adj.items():
-        if s1 not in spos:
+    for child, parent in parent_of.items():
+        if child not in display_serials or parent not in display_serials:
             continue
-        li1, ni1 = spos[s1]
-        for s2 in neighbors:
-            if s2 not in spos:
-                continue
-            pair = (min(s1, s2), max(s1, s2))
-            if pair in drawn_pairs:
-                continue
-            drawn_pairs.add(pair)
-            li2, ni2 = spos[s2]
-            if li1 == li2:
-                # Same-row peers (e.g. stacked switches) — horizontal sibling line
-                fx = pos[li1][ni1][0] + nw / 2
-                fy = pos[li1][ni1][1] + nh / 2
-                tx = pos[li2][ni2][0] + nw / 2
-                ty = pos[li2][ni2][1] + nh / 2
-            elif li1 < li2:
-                fx = pos[li1][ni1][0] + nw / 2; fy = pos[li1][ni1][1] + nh
-                tx = pos[li2][ni2][0] + nw / 2; ty = pos[li2][ni2][1]
-                has_upper_edge.add(s2)
+        px, py = positions[parent]
+        cx, cy = positions[child]
+        link = parent_link_of.get(child, {})
+        speed = _svg_esc(link.get("local_speed") or "")
+        local_port = _svg_esc(link.get("local_port") or "")
+        remote_port = _svg_esc(link.get("remote_port") or "")
+        parts.append(
+            f'<line x1="{px + node_w/2:.1f}" y1="{py + node_h:.1f}" x2="{cx + node_w/2:.1f}" y2="{cy:.1f}" '
+            f'stroke="#8a9269" stroke-width="1.8" opacity="0.95"/>'
+        )
+        if speed or local_port or remote_port:
+            parts.append(
+                f'<text x="{(px + cx)/2 + node_w/2:.1f}" y="{(py + cy)/2 + node_h/2:.1f}" '
+                f'text-anchor="middle" font-size="8" fill="#57534e" '
+                f'paint-order="stroke" stroke="#f8fafc" stroke-width="3">'
+                f'{_svg_esc(local_port)}'
+                f'{" -> " + remote_port if remote_port else ""}'
+                f'{" · " + speed if speed else ""}</text>'
+            )
+    parts.append("</g>")
+
+    def _draw_switch_ports(nx: float, ny: float, ports: List[Dict[str, Any]]) -> str:
+        if not ports:
+            return ""
+        panel_x = nx + 10
+        panel_y = ny + 68
+        panel_w = node_w - 20
+        panel_h = 26
+        cols = min(max(len(ports) // 2, 12), 24)
+        rows = 2 if len(ports) > cols else 1
+        slot_w = (panel_w - (cols - 1) * 2) / cols
+        slot_h = 10
+        svg = [
+            f'<rect x="{panel_x:.1f}" y="{panel_y:.1f}" width="{panel_w:.1f}" height="{panel_h:.1f}" '
+            f'rx="5" fill="rgba(15,23,42,0.18)" stroke="rgba(255,255,255,0.18)" stroke-width="0.8"/>'
+        ]
+        for idx, port in enumerate(ports[: cols * rows]):
+            row = idx // cols
+            col = idx % cols
+            x = panel_x + col * (slot_w + 2)
+            y = panel_y + 4 + row * 12
+            if port.get("isUplink"):
+                fill = "#fbbf24"
+            elif port.get("status") == "Connected":
+                fill = "#4ade80"
+            elif port.get("status") == "Disabled":
+                fill = "#475569"
             else:
-                fx = pos[li2][ni2][0] + nw / 2; fy = pos[li2][ni2][1] + nh
-                tx = pos[li1][ni1][0] + nw / 2; ty = pos[li1][ni1][1]
-                has_upper_edge.add(s1)
+                fill = "#cbd5e1"
+            svg.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{slot_w:.1f}" height="{slot_h:.1f}" '
+                f'rx="1.8" fill="{fill}" opacity="0.95"/>'
+            )
+        return "".join(svg)
+
+    for serial in ["__internet__"] + [s for layer in layers[1:] for s in layer]:
+        nx, ny = positions[serial]
+        if serial == "__internet__":
             parts.append(
-                f'<line x1="{fx:.1f}" y1="{fy:.1f}" x2="{tx:.1f}" y2="{ty:.1f}" '
-                f'stroke="#8a9269" stroke-width="1.5" opacity="0.9"/>'
+                f'<rect x="{nx:.1f}" y="{ny:.1f}" width="{node_w}" height="{node_h}" rx="10" '
+                f'fill="#1c1917" stroke="#44403c" stroke-width="1.2"/>'
+            )
+            parts.append(
+                f'<text x="{nx + node_w/2:.1f}" y="{ny + 44:.1f}" text-anchor="middle" '
+                f'font-size="20" font-weight="700" fill="#eef0e6">Internet</text>'
+            )
+            parts.append(
+                f'<text x="{nx + node_w/2:.1f}" y="{ny + 68:.1f}" text-anchor="middle" '
+                f'font-size="10" fill="#c4c9b0">Packet entry point</text>'
+            )
+            continue
+
+        info = node_info[serial]
+        ntype = info["type"]
+        status = info["status"]
+        label = _svg_esc(info["label"])
+        model = _svg_esc(info["model"])
+        C = _TOPO_C.get(ntype, _TOPO_C["camera"])
+        dot_c = _TOPO_DOT.get(status, "#94a3b8")
+        has_issue = bool(port_issues.get(serial))
+        if ntype == "wireless":
+            util = float((ap_util.get(serial) or {}).get("utilizationTotal", 0))
+            has_issue = has_issue or util > 70
+        border = "#f87171" if has_issue else C["bd"]
+        border_w = "2" if has_issue else "1.2"
+
+        parts.append(
+            f'<rect x="{nx:.1f}" y="{ny:.1f}" width="{node_w}" height="{node_h}" rx="10" '
+            f'fill="{C["bg"]}" stroke="{border}" stroke-width="{border_w}"/>'
+        )
+        parts.append(
+            f'<circle cx="{nx + node_w - 12:.1f}" cy="{ny + 12:.1f}" r="4" fill="{dot_c}"/>'
+        )
+        badge = _TOPO_BADGE.get(ntype, "")
+        if badge:
+            parts.append(
+                f'<rect x="{nx+8:.1f}" y="{ny+8:.1f}" width="28" height="14" rx="3" fill="{C["bd"]}" opacity="0.78"/>'
+            )
+            parts.append(
+                f'<text x="{nx+22:.1f}" y="{ny+18.5:.1f}" text-anchor="middle" font-size="8" font-weight="700" fill="{C["fg"]}">{badge}</text>'
             )
 
-    # 3. Dashed fallback for devices with no confirmed upward edge
-    for li in range(2, len(layers)):
-        for ni, node in enumerate(layers[li]):
-            s = node.get("s", "")
-            if not s or s in has_upper_edge:
-                continue
-            # Connect to the horizontally nearest node in the layer above
-            cx = pos[li][ni][0] + nw / 2
-            best = min(range(len(layers[li - 1])),
-                       key=lambda k: abs(pos[li - 1][k][0] + nw / 2 - cx))
-            fx = pos[li - 1][best][0] + nw / 2
-            fy = pos[li - 1][best][1] + nh
-            ty = pos[li][ni][1]
+        parts.append(
+            f'<text x="{nx + node_w/2:.1f}" y="{ny + 28:.1f}" text-anchor="middle" '
+            f'font-size="11" font-weight="700" fill="{C["fg"]}">{label}</text>'
+        )
+        parts.append(
+            f'<text x="{nx + node_w/2:.1f}" y="{ny + 42:.1f}" text-anchor="middle" '
+            f'font-size="8.5" fill="{C["fg"]}" opacity="0.72">{model}</text>'
+        )
+
+        parent_name = ""
+        if serial in parent_of:
+            up = serial_to_dev[parent_of[serial]]
+            parent_name = up.get("name") or up.get("model") or parent_of[serial]
+        children_list = children.get(serial, [])
+        child_switches = sum(1 for child in children_list if serial_to_dev[child].get("productType") == "switch")
+        child_edges = len(children_list) - child_switches
+        ports = info["ports"]
+        uplink_ports = [p for p in ports if p.get("isUplink")]
+
+        line1 = f"Above: {(parent_name[:20] + '…') if len(parent_name) > 21 else parent_name}" if parent_name else "Above: Internet edge"
+        line2 = (
+            f"Ports: {len(ports)}  Uplink: {uplink_ports[0].get('portId')} {uplink_ports[0].get('speed', '')}".strip()
+            if uplink_ports else
+            f"Ports: {len(ports)}"
+        )
+        line3 = f"Below: {child_switches} sw / {child_edges} edge"
+        for idx, text in enumerate((line1, line2, line3)):
             parts.append(
-                f'<line x1="{fx:.1f}" y1="{fy:.1f}" x2="{cx:.1f}" y2="{ty:.1f}" '
-                f'stroke="#c4c9b0" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.75"/>'
+                f'<text x="{nx + 10:.1f}" y="{ny + 56 + idx*11:.1f}" font-size="8.5" fill="{C["fg"]}" opacity="0.88">{_svg_esc(text[:42])}</text>'
             )
 
-    parts.append('</g>')
+        if ntype == "switch":
+            parts.append(_draw_switch_ports(nx, ny, ports))
 
-    # ── Nodes ─────────────────────────────────────────────────────────────────
-    for li, layer in enumerate(layers):
-        for ni, node in enumerate(layer):
-            nx, ny = pos[li][ni]
-            s      = node.get("s", "")
-            ntype  = node.get("type", "internet")
-            status = node.get("status", "unknown")
-            label  = _svg_esc(node.get("label", ""))
-            model  = _svg_esc(node.get("model", ""))
-            C      = _TOPO_C.get(ntype, _TOPO_C["camera"])
-            dot_c  = _TOPO_DOT.get(status, "#94a3b8")
-            badge  = _TOPO_BADGE.get(ntype, "")
-
-            has_issue = False
-            if s:
-                has_issue = bool(port_issues.get(s))
-                if ntype == "wireless":
-                    util = float((ap_util.get(s) or {}).get("utilizationTotal", 0))
-                    has_issue = has_issue or util > 70
-
-            bw = "2" if has_issue else "1"
-            bc = "#f87171" if has_issue else C["bd"]
-
+        if has_issue:
             parts.append(
-                f'<rect x="{nx:.1f}" y="{ny:.1f}" width="{nw}" height="{nh}" '
-                f'rx="7" fill="{C["bg"]}" stroke="{bc}" stroke-width="{bw}"/>'
+                f'<text x="{nx + node_w - 20:.1f}" y="{ny + node_h - 12:.1f}" font-size="10" fill="#fbbf24">&#9888;</text>'
             )
-            if status not in ("stub", "info"):
-                parts.append(
-                    f'<circle cx="{nx+nw-10:.1f}" cy="{ny+10:.1f}" r="4" fill="{dot_c}"/>'
-                )
-            if badge:
-                parts.append(
-                    f'<rect x="{nx+6:.1f}" y="{ny+7:.1f}" width="22" height="12" '
-                    f'rx="3" fill="{C["bd"]}" opacity="0.7"/>'
-                )
-                parts.append(
-                    f'<text x="{nx+17:.1f}" y="{ny+16:.1f}" text-anchor="middle" '
-                    f'font-size="7.5" font-weight="700" fill="{C["fg"]}" '
-                    f'letter-spacing="0.3">{badge}</text>'
-                )
-            cy_l = ny + nh / 2 + (3 if model and ntype != "internet" else 6)
-            parts.append(
-                f'<text x="{nx+nw/2:.1f}" y="{cy_l:.1f}" text-anchor="middle" '
-                f'font-size="10" font-weight="600" fill="{C["fg"]}">{label}</text>'
-            )
-            if model and ntype != "internet":
-                parts.append(
-                    f'<text x="{nx+nw/2:.1f}" y="{cy_l+12:.1f}" text-anchor="middle" '
-                    f'font-size="8" fill="{C["fg"]}" opacity="0.65">{model}</text>'
-                )
-            if has_issue:
-                parts.append(
-                    f'<text x="{nx+8:.1f}" y="{ny+nh-7:.1f}" '
-                    f'font-size="9" fill="#fbbf24">&#9888;</text>'
-                )
 
-    parts.append('</svg>')
+    parts.append("</svg>")
     return "".join(parts)
+
+
+def _topo_summary_rows(
+    devices: List[Dict[str, Any]],
+    lldp_cdp: Dict[str, Any],
+    switch_port_statuses_by_switch: Dict[str, Any],
+) -> List[List[str]]:
+    serial_to_dev = {
+        d.get("serial"): d for d in devices if isinstance(d, dict) and d.get("serial")
+    }
+    if not serial_to_dev:
+        return []
+
+    def _norm(value: Any) -> str:
+        return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+    id_to_serial: Dict[str, str] = {}
+    for serial, dev in serial_to_dev.items():
+        id_to_serial[_norm(serial)] = serial
+        if dev.get("mac"):
+            id_to_serial[_norm(dev.get("mac"))] = serial
+
+    status_by_switch: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if isinstance(switch_port_statuses_by_switch, dict):
+        for serial, ports in switch_port_statuses_by_switch.items():
+            if isinstance(ports, list):
+                status_by_switch[serial] = {
+                    str(p.get("portId")): p for p in ports if isinstance(p, dict)
+                }
+
+    parent_of: Dict[str, Tuple[str, str, str]] = {}
+    child_counts: Dict[str, int] = {}
+    edge_counts: Dict[str, int] = {}
+
+    for local_serial, data in lldp_cdp.items() if isinstance(lldp_cdp, dict) else []:
+        if local_serial not in serial_to_dev or not isinstance(data, dict):
+            continue
+        ports = data.get("ports", {})
+        if not isinstance(ports, dict):
+            continue
+        for local_port, port_data in ports.items():
+            if not isinstance(port_data, dict):
+                continue
+            port_status = status_by_switch.get(local_serial, {}).get(str(local_port), {})
+            neighbor_serial = None
+            neighbor_port = ""
+            for key in ("lldp", "cdp"):
+                disc = port_data.get(key)
+                if not isinstance(disc, dict):
+                    continue
+                neighbor_port = str(disc.get("portId") or neighbor_port)
+                for candidate in (
+                    disc.get("chassisId"),
+                    disc.get("deviceId"),
+                    port_data.get("deviceMac"),
+                ):
+                    neighbor_serial = id_to_serial.get(_norm(candidate))
+                    if neighbor_serial:
+                        break
+                if neighbor_serial:
+                    break
+            if not neighbor_serial or neighbor_serial == local_serial:
+                continue
+
+            local_type = serial_to_dev[local_serial].get("productType")
+            neighbor_type = serial_to_dev[neighbor_serial].get("productType")
+            if bool(port_status.get("isUplink")) and neighbor_type in ("switch", "appliance"):
+                parent_of[local_serial] = (
+                    neighbor_serial,
+                    str(local_port),
+                    neighbor_port,
+                )
+                child_counts[neighbor_serial] = child_counts.get(neighbor_serial, 0) + 1
+            elif local_type == "switch" and neighbor_type in ("wireless", "camera", "sensor"):
+                edge_counts[local_serial] = edge_counts.get(local_serial, 0) + 1
+
+    rows: List[List[str]] = []
+    for serial, dev in sorted(
+        serial_to_dev.items(),
+        key=lambda item: (
+            0 if item[1].get("productType") == "appliance" else 1,
+            item[1].get("name") or item[0],
+        ),
+    ):
+        if dev.get("productType") not in ("appliance", "switch"):
+            continue
+        parent = parent_of.get(serial)
+        if parent:
+            parent_name = serial_to_dev.get(parent[0], {}).get("name") or parent[0]
+            upstream = f"{parent_name} ({parent[1]} -> {parent[2] or '?'})"
+        else:
+            upstream = "Internet edge"
+        rows.append(
+            [
+                dev.get("name") or serial,
+                dev.get("model") or "",
+                upstream,
+                str(child_counts.get(serial, 0)),
+                str(edge_counts.get(serial, 0)),
+            ]
+        )
+    return rows
 
 
 def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str:
@@ -559,6 +768,10 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         wireless_clients = [cl for cl in _wc_raw if isinstance(cl, dict)]
     else:
         wireless_clients = []
+    switch_port_statuses_by_switch = (
+        load_json(os.path.join(org_dir, "switch_port_statuses.json")) or {}
+    )
+
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
     def _flatten_ports(path: str) -> List[Dict]:
@@ -671,13 +884,21 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     for issue in switch_port_issues:
         port_issues_by_switch.setdefault(issue["switch"], []).append(issue)
 
+    networks_by_id = {
+        n.get("id"): n for n in networks if isinstance(n, dict) and n.get("id")
+    }
+
     # Group devices by network (building / site)
     devices_by_network: Dict[str, dict] = {}
     serial_to_network: Dict[str, dict] = {}
     for device in devices_avail:
         net = device.get("network") or {}
         net_id = net.get("id", "unassigned")
-        net_name = net.get("name", "Unassigned")
+        net_name = (
+            net.get("name")
+            or (networks_by_id.get(net_id) or {}).get("name")
+            or "Unassigned"
+        )
         serial = device.get("serial", "")
         if net_id not in devices_by_network:
             devices_by_network[net_id] = {"name": net_name, "id": net_id, "devices": []}
@@ -976,6 +1197,9 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         site_devs = net_data["devices"]
         if not site_devs:
             continue
+        infra_devs = [
+            d for d in site_devs if d.get("productType") in ("appliance", "switch")
+        ]
         site_serials = {d["serial"] for d in site_devs if d.get("serial")}
         has_lldp = isinstance(lldp_cdp, dict) and any(
             s in lldp_cdp for s in site_serials
@@ -991,12 +1215,33 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
                 "</div>"
             )
         )
-        svg = _topo_svg(site_devs, lldp_cdp, ap_util_by_serial, port_issues_by_switch)
+        if not infra_devs:
+            topo_body = (
+                '<div class="summary-card"><div class="summary-body">'
+                "No switch or MX infrastructure was present in this site slice. "
+                "Wireless edge devices exist, but there is not enough switching hierarchy "
+                "here to render an upstream/downstream topology tree."
+                "</div></div>"
+            )
+        else:
+            summary_rows = _topo_summary_rows(
+                site_devs,
+                lldp_cdp,
+                switch_port_statuses_by_switch,
+            )
+            topo_body = (
+                f'<div class="topo-diagram">{_topo_svg(site_devs, lldp_cdp, ap_util_by_serial, port_issues_by_switch, switch_port_statuses_by_switch)}</div>'
+                + render_section(
+                    "Topology Summary",
+                    [["Device", "Model", "Upstream", "Child Switches", "Edge Devices"]]
+                    + summary_rows if summary_rows else [],
+                )
+            )
         topo_site_parts.append(
             f'<div class="topo-site">'
             f'<h2>{_he(net_data["name"])}</h2>'
             f'{lldp_banner}'
-            f'<div class="topo-diagram">{svg}</div>'
+            f'{topo_body}'
             f'</div>'
         )
 
@@ -1024,11 +1269,13 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     topology_html = f"""
     <section id="network-topology" class="report-section">
       <h1>3. Network Topology</h1>
-      <p>Hierarchical diagrams for each managed site showing the data path from Internet
-         edge (WAN) through MX security appliances, MS switches, and MR access points.
-         Solid edges indicate LLDP/CDP-confirmed adjacencies; dashed edges are inferred
-         from the device hierarchy. Devices with active issues are highlighted with a
-         red border and warning symbol (&#9888;).</p>
+      <p>Hierarchical diagrams for each managed site showing upstream and downstream packet
+         flow from the internet edge through MX security appliances into the switching
+         fabric. The diagram renders appliances and switches as the primary tree, while
+         wireless and other edge devices are summarized inside their parent switch counts.
+         Switch cards display approximate front-panel port layouts, uplink ports, upstream
+         neighbors, and child device counts. Solid edges indicate LLDP/CDP-confirmed
+         adjacencies; dashed edges indicate the internet handoff above root devices.</p>
       {topo_legend}
       {"".join(topo_site_parts) if topo_site_parts else
        '<div class="summary-card"><div class="summary-body">No site topology data available.</div></div>'}
