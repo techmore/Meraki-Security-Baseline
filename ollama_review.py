@@ -13,6 +13,7 @@ import sys
 import urllib.request
 import urllib.error
 from datetime import datetime
+from typing import List
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,42 @@ Configuration changes or checks that are easy to do now and will reduce noise or
 2–4 sentence executive summary of overall network health and the top risk to address first.\
 """
 
+SYNTHESIS_PROMPT_TEMPLATE = """\
+Below are chunked engineering reviews produced from different sections of the same Meraki network health report.
+
+--- BEGIN CHUNK REVIEWS ---
+{content}
+--- END CHUNK REVIEWS ---
+
+Merge them into one final prioritised engineering review.
+
+Rules:
+- Deduplicate repeated findings.
+- Preserve the highest severity when multiple chunks mention the same problem.
+- Prefer concrete operational actions over generic summaries.
+- If chunk reviews disagree, note the uncertainty briefly instead of inventing confidence.
+
+Respond using EXACTLY this structure (include all six sections even if empty):
+
+## 🔴 Critical  (resolve within 48 hours)
+Issues causing or likely to cause immediate outages, security exposure, or license failure.
+
+## 🟠 High Priority  (resolve within 2 weeks)
+Degraded performance, recurring errors, or capacity issues with measurable user impact.
+
+## 🟡 Medium Priority  (resolve within 60 days)
+Suboptimal configurations, growing risks, or items that need scheduled maintenance.
+
+## 🔵 Long-term Improvements  (next planning cycle)
+Architecture, hardware refresh, or strategic changes worth budgeting for.
+
+## ✅ Quick Wins  (< 1 hour each, low risk)
+Configuration changes or checks that are easy to do now and will reduce noise or risk.
+
+## 📊 Risk Summary
+2–4 sentence executive summary of overall network health and the top risk to address first.\
+"""
+
 
 def ollama_available() -> bool:
     """Return True if Ollama is running and the target model is present."""
@@ -107,13 +144,56 @@ def ollama_available() -> bool:
         return False
 
 
-def stream_ollama(content: str) -> str:
+def split_markdown_sections(content: str) -> List[str]:
+    sections: List[str] = []
+    current: List[str] = []
+    for line in content.splitlines():
+        if line.startswith("# ") and current:
+            sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+    return [section for section in sections if section]
+
+
+def build_review_chunks(content: str, max_chars: int = MAX_INPUT_CHARS) -> List[str]:
+    chunks: List[str] = []
+    current = ""
+    for section in split_markdown_sections(content):
+        if not current:
+            current = section
+            continue
+        candidate = f"{current}\n\n{section}"
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            chunks.append(current)
+            if len(section) <= max_chars:
+                current = section
+            else:
+                for start in range(0, len(section), max_chars):
+                    piece = section[start:start + max_chars]
+                    if len(piece) == max_chars:
+                        chunks.append(piece)
+                    else:
+                        current = piece
+                if len(current) == max_chars:
+                    chunks.append(current)
+                    current = ""
+    if current:
+        chunks.append(current)
+    return chunks or [content[:max_chars]]
+
+
+def stream_ollama(content: str, prompt_template: str = USER_PROMPT_TEMPLATE) -> str:
     """Stream a generate request to Ollama and return the full response text."""
     payload = json.dumps(
         {
             "model": MODEL,
             "system": SYSTEM_PROMPT,
-            "prompt": USER_PROMPT_TEMPLATE.format(content=content[:MAX_INPUT_CHARS]),
+            "prompt": prompt_template.format(content=content),
             "stream": True,
             "options": {
                 "temperature": 0.3,   # lower = more factual
@@ -153,6 +233,26 @@ def stream_ollama(content: str) -> str:
     return "".join(tokens).strip()
 
 
+def review_content(content: str) -> str:
+    chunks = build_review_chunks(content, MAX_INPUT_CHARS)
+    if len(chunks) == 1:
+        return stream_ollama(chunks[0])
+
+    chunk_reviews = []
+    for idx, chunk in enumerate(chunks, start=1):
+        print(f"  Reviewing chunk {idx}/{len(chunks)}", flush=True)
+        reviewed = stream_ollama(f"[Chunk {idx}/{len(chunks)}]\n\n{chunk}")
+        chunk_reviews.append(f"## Chunk {idx}\n\n{reviewed}")
+
+    synthesis_input = "\n\n".join(chunk_reviews)
+    print(f"  Synthesizing {len(chunks)} chunk reviews", flush=True)
+    final_review = stream_ollama(synthesis_input, prompt_template=SYNTHESIS_PROMPT_TEMPLATE)
+    return (
+        "> Note: This AI review was generated from section-aware chunks and then synthesized.\n\n"
+        + final_review
+    )
+
+
 def main() -> int:
     master_rec = os.path.join(BACKUPS_DIR, "master_recommendations.md")
     if not os.path.exists(master_rec):
@@ -173,14 +273,14 @@ def main() -> int:
         return 0
 
     char_count = len(content)
-    truncated = char_count > MAX_INPUT_CHARS
+    chunks = build_review_chunks(content, MAX_INPUT_CHARS)
     log.info(
-        "Input: %s chars%s",
+        "Input: %s chars across %d chunk(s)",
         f"{char_count:,}",
-        " (will be truncated to fit context)" if truncated else "",
+        len(chunks),
     )
 
-    enhanced = stream_ollama(content)
+    enhanced = review_content(content)
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     out_path = os.path.join(BACKUPS_DIR, "recommendations_ai_enhanced.md")
