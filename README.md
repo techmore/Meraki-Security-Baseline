@@ -1,71 +1,90 @@
-# Meraki Enhanced Report Generator
+# Meraki Security Baseline and Report Suite
 
-This repository contains an enhanced report generator for Meraki network data that creates professional, visually-rich PDF and HTML reports.
+This repository now combines two related workflows:
 
-## Features
+1. Legacy Meraki security baseline scripts for MX-focused best-practice checks.
+2. An enhanced reporting pipeline that backs up Meraki org data, generates recommendations, optionally runs a local Ollama review, and renders HTML/PDF reports.
 
-- **Professional Multi-Section Reports**: Cover page, table of contents, executive summary, technical breakdown, issues, recommendations, and implementation plan
-- **Beautiful Styling**: Uses the same olive and stone color palette as the 2026-new_sites template
-- **Interactive Elements**: Icons, hover effects, gradients, and visual hierarchy
-- **Comprehensive Analytics**: 
-  - Device status and inventory overviews
-  - PoE power consumption analysis (switch and port level)
-  - Channel utilization tracking with trending charts
-  - Wireless statistics and configuration analysis
-  - Port error and duplex mismatch detection
-- **Multiple Chart Types**: Bar charts, line charts, and pie charts for data visualization
-- **Actionable Insights**: Prioritized recommendations with implementation roadmap
-- **Template Matching**: Designed to match the visual style of 2026-new_sites
+The current working branch is centered on the reporting pipeline while preserving the upstream baseline scripts so they can be integrated into future report sections.
 
-## Usage
+## Components
 
-1. Place Meraki backup data in directories matching the pattern: `meraki_backup_*/org_*/`
-2. Each org directory should contain:
-   - `recommendations.md` (markdown formatted recommendations)
-   - `inventory_summary.json` (device inventory data)
-   - `poe_power_summary.json` (PoE power consumption data)
-   - Optional: `devices_availabilities.json`, `channel_utilization_by_device.json`, etc.
-3. Run the generator:
-   ```bash
-   python3 report_generator.py
-   ```
-4. Reports will be generated as both PDF and HTML in each org directory:
-   - `report.pdf` - Professional PDF report
-   - `report.html` - Beautifully styled HTML version
+- `Meraki-Baseline-Security.py`
+- `mbsv2.py`, `v6_baseline.py`, `v6-mdm.py`, `v9.py`
+- `networking-script-no-topography.py`
+- `license.py`
+- `orgs.sh`
+- `meraki_backup.py`
+- `meraki_query.py`
+- `merge_recommendations.py`
+- `ollama_review.py`
+- `report_generator.py`
+- `run.sh`
 
-## Sample Data
+## Reporting Pipeline
 
-Sample data for Contoso.net corporation is included in `sample_data/contoso_net/` to demonstrate the report generation capabilities.
+The reporting workflow pulls Meraki API data into per-org backup directories, produces recommendations, optionally enhances them with Ollama, and generates HTML/PDF reports.
 
-## Repository Structure
+### Usage
 
-- `report_generator.py` - Main report generation script
-- `sample_data/` - Sample data sets for testing
-- `2026-new_sites/` - Reference styling and template files
-- `.gitignore` - Configured to exclude reports from version control
+1. Create a local `.env` from `.env.example`.
+2. Set `MERAKI_API_KEY`.
+3. Run:
 
-## Integration
+```bash
+./run.sh
+```
 
-This repository is designed to work alongside the Meraki Security Baseline repository:
-- Add as upstream remote: `git remote add upstream https://github.com/techmore/Meraki-Security-Baseline.git`
-- Work on feature branches (like `enhanced-reporting`)
-- Periodically pull updates from upstream
-- Push feature branches to your own origin
+Optional:
+
+```bash
+./run.sh --model qwen3.5:27b
+```
+
+### Output
+
+- `backups/<org>/recommendations.md`
+- `backups/<org>/report.html`
+- `backups/<org>/report.pdf`
+- `backups/master_recommendations.md`
+- `backups/recommendations_ai_enhanced.md`
+
+## Legacy Security Baseline
+
+The original baseline scripts check Meraki MX firewall posture against Meraki best practices, including licensing, anti-malware, IDS/IPS, spoof protection, and exposed ports.
+
+Basic usage for the original baseline script:
+
+```bash
+python Meraki-Baseline-Security.py
+```
+
+Those scripts currently coexist with the report generator and should be treated as source inputs for a later unified assessment flow.
 
 ## Requirements
 
 - Python 3.x
-- WeasyPrint (for PDF generation): `pip install weasyprint`
-- wkhtmltopdf (fallback option)
+- `meraki`
+- `prettytable`
+- WeasyPrint for PDF generation
+- `wkhtmltopdf` as an optional PDF fallback
+- Ollama for optional local review
 
-## Output Examples
+## Current Direction
 
-Reports include:
-- Cover page with organization branding and generation timestamp
-- Interactive table of contents
-- Executive summary with key metrics dashboard
-- Visual charts showing device distribution, PoE consumption, and utilization trends
-- Detailed sections covering device inventory, technical specifications, identified issues, and prioritized recommendations
-- Implementation roadmap with hardware placement guidance and upgrade suggestions
+Near-term work for the integrated v1 release:
 
-All reports maintain consistent styling with the olive color scheme and professional typography.
+- merge baseline findings into the generated report
+- harden handling of secrets and backup artifacts
+- improve portability and dependency management
+- add tests and CI coverage
+
+## Security Notes
+
+- Do not commit `.env`.
+- Do not commit live backups or generated reports.
+- Rotate any API key that was previously stored in the repo or shared history.
+
+## License
+
+The upstream baseline project includes GPL-3.0 licensed components. Review licensing obligations before redistributing a packaged v1 release.
