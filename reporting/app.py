@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -72,6 +73,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     appliance_uplinks_usage = load_json(os.path.join(org_dir, "appliance_uplinks_usage.json")) or {}
     devices_statuses_raw = load_json(os.path.join(org_dir, "devices_statuses.json")) or []
     clients_overview_raw = load_json(os.path.join(org_dir, "clients_overview.json")) or {}
+    licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -218,15 +220,14 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     top_models = inventory_summary.get("top_models") or []
     total_devices = sum(inv_by_type.values()) if inv_by_type else len(devices_avail)
 
-    # KPI items
+    # KPI items (compact row — kept for TOC/overview tables)
+    online_count_v = device_status_counts.get("online", 0)
+    offline_count_v = sum(v for k, v in device_status_counts.items() if k != "online")
     kpi_items = [
         ("Total Sites", str(len(networks) or len(devices_by_network))),
         ("Total Devices", str(total_devices)),
-        ("Online", str(device_status_counts.get("online", 0))),
-        (
-            "Offline / Alert",
-            str(sum(v for k, v in device_status_counts.items() if k != "online")),
-        ),
+        ("Online", str(online_count_v)),
+        ("Offline / Alert", str(offline_count_v)),
         ("MX Appliances", str(inv_by_type.get("appliance", 0))),
         ("MS Switches", str(inv_by_type.get("switch", 0))),
         ("MR Access Points", str(inv_by_type.get("wireless", 0))),
@@ -241,10 +242,167 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         else build_fallback_security_checks(devices_avail, inv_by_type, switch_port_issues)
     )
 
+    # ── Health at a Glance domain scoring ──────────────────────────────────
+    def _hcard(domain: str, rating: str, stat: str, detail: str) -> str:
+        """rating: 'good' | 'warn' | 'crit' | 'info'"""
+        icons = {"good": "✓", "warn": "⚠", "crit": "✕", "info": "–"}
+        return (
+            f'<div class="health-card health-card--{rating}">'
+            f'<div class="health-card-header">'
+            f'<span class="health-card-icon">{icons.get(rating, "–")}</span>'
+            f'<span class="health-card-domain">{_he(domain)}</span>'
+            f'</div>'
+            f'<div class="health-card-stat">{stat}</div>'
+            f'<div class="health-card-detail">{detail}</div>'
+            f'</div>'
+        )
+
+    # Availability
+    avail_pct = round(100 * online_count_v / max(total_devices, 1))
+    if avail_pct >= 98:
+        _avail_rating = "good"
+    elif avail_pct >= 90:
+        _avail_rating = "warn"
+    else:
+        _avail_rating = "crit"
+    _avail_card = _hcard(
+        "Availability", _avail_rating,
+        f"{avail_pct}% online",
+        f"{online_count_v} of {total_devices} devices",
+    )
+
+    # Wireless / RF
+    _ap_total = inv_by_type.get("wireless", 0)
+    _high_ap = len(high_util_devices)
+    _mod_ap  = len(moderate_util_devices)
+    if _high_ap > max(1, _ap_total * 0.15):
+        _rf_rating = "crit"
+    elif _high_ap > 0:
+        _rf_rating = "warn"
+    else:
+        _rf_rating = "good" if _ap_total > 0 else "info"
+    _rf_card = _hcard(
+        "Wireless / RF", _rf_rating,
+        f"{_high_ap} high-util AP{'s' if _high_ap != 1 else ''}",
+        f"{_mod_ap} moderate · {_ap_total} total APs",
+    )
+
+    # Switching
+    _sw_issues = len(switch_port_issues)
+    _cfg_issues = len(config_issues)
+    if _sw_issues > 5 or _cfg_issues > 5:
+        _sw_rating = "crit"
+    elif _sw_issues > 0 or _cfg_issues > 0:
+        _sw_rating = "warn"
+    else:
+        _sw_rating = "good" if inv_by_type.get("switch", 0) > 0 else "info"
+    _sw_card = _hcard(
+        "Switching", _sw_rating,
+        f"{_sw_issues} port issue{'s' if _sw_issues != 1 else ''}",
+        f"{_cfg_issues} config anomal{'ies' if _cfg_issues != 1 else 'y'} · {inv_by_type.get('switch', 0)} switches",
+    )
+
+    # WAN
+    _wan_active = sum(
+        1 for u in (uplink_statuses if isinstance(uplink_statuses, list) else [])
+        if isinstance(u, dict) and str(u.get("status", "")).lower() == "active"
+    )
+    _wan_total = sum(
+        1 for u in (uplink_statuses if isinstance(uplink_statuses, list) else [])
+        if isinstance(u, dict) and u.get("interface")
+    )
+    _wan_down = _wan_total - _wan_active
+    if _wan_total == 0:
+        _wan_rating, _wan_stat, _wan_detail = "info", "No WAN data", "uplink status unavailable"
+    elif _wan_down > 0:
+        _wan_rating = "crit" if _wan_active == 0 else "warn"
+        _wan_stat = f"{_wan_down} link{'s' if _wan_down != 1 else ''} down"
+        _wan_detail = f"{_wan_active} active of {_wan_total} uplinks"
+    else:
+        _wan_rating = "good"
+        _wan_stat = f"{_wan_active} active"
+        _wan_detail = f"{_wan_total} uplink{'s' if _wan_total != 1 else ''} healthy"
+    _wan_card = _hcard("WAN / Internet", _wan_rating, _wan_stat, _wan_detail)
+
+    # Security
+    _sec_fail  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "fail")
+    _sec_warn  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "warning")
+    _sec_pass  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "pass")
+    if _sec_fail > 0:
+        _sec_rating = "crit"
+    elif _sec_warn > 0:
+        _sec_rating = "warn"
+    else:
+        _sec_rating = "good" if _sec_pass > 0 else "info"
+    _sec_card = _hcard(
+        "Security Baseline", _sec_rating,
+        f"{_sec_fail} fail{'s' if _sec_fail != 1 else ''} · {_sec_warn} warn{'s' if _sec_warn != 1 else ''}",
+        f"{_sec_pass} checks passed",
+    )
+
+    # Lifecycle (EOL heuristic — flag known legacy model prefixes)
+    _EOL_PREFIXES = (
+        "MR18", "MR24", "MR26", "MR32", "MR34",
+        "MS220", "MS320", "MS420",
+        "MX64", "MX65", "MX80", "MX84", "MX90", "MX400", "MX600",
+    )
+    _eol_models = [
+        m for m, _ in top_models
+        if any(str(m).upper().startswith(p) for p in _EOL_PREFIXES)
+    ]
+    _model_count = len(top_models)
+    if _eol_models:
+        _lc_rating = "crit"
+        _lc_stat   = f"{len(_eol_models)} EOL model{'s' if len(_eol_models) != 1 else ''}"
+        _lc_detail = ", ".join(_eol_models[:4]) + (" …" if len(_eol_models) > 4 else "")
+    elif _model_count > 8:
+        _lc_rating = "warn"
+        _lc_stat   = f"{_model_count} distinct models"
+        _lc_detail = "high hardware fragmentation"
+    else:
+        _lc_rating = "good" if _model_count > 0 else "info"
+        _lc_stat   = f"{_model_count} model{'s' if _model_count != 1 else ''}"
+        _lc_detail = "no known EOL hardware flagged"
+    _lc_card = _hcard("Lifecycle / Hardware", _lc_rating, _lc_stat, _lc_detail)
+
+    # Licensing
+    _lic_mode = licensing_data.get("licenseMode") if isinstance(licensing_data, dict) else None
+    _lic_list = licensing_data.get("licenses", []) if isinstance(licensing_data, dict) else []
+    _lic_expired = sum(
+        1 for lic in _lic_list
+        if isinstance(lic, dict) and str(lic.get("status", "")).lower() in ("expired", "inactive")
+    )
+    _lic_active = sum(
+        1 for lic in _lic_list
+        if isinstance(lic, dict) and str(lic.get("status", "")).lower() in ("ok", "active", "in compliance")
+    )
+    if isinstance(licensing_data, dict) and licensing_data.get("error"):
+        _lic_rating, _lic_stat, _lic_detail = "info", "Data unavailable", "license API not accessible"
+    elif _lic_expired > 0:
+        _lic_rating = "crit"
+        _lic_stat   = f"{_lic_expired} expired"
+        _lic_detail = f"{_lic_active} active · {_lic_mode or 'unknown'} model"
+    elif _lic_active > 0:
+        _lic_rating = "good"
+        _lic_stat   = f"{_lic_active} active"
+        _lic_detail = f"{_lic_mode or 'co-term'} licensing"
+    else:
+        _lic_rating, _lic_stat, _lic_detail = "info", "No detail", f"{_lic_mode or 'unknown'} model"
+    _lic_card = _hcard("Licensing", _lic_rating, _lic_stat, _lic_detail)
+
+    health_grid_html = (
+        '<div class="health-grid">'
+        + _avail_card + _rf_card + _sw_card + _wan_card
+        + _sec_card + _lc_card + _lic_card
+        + '</div>'
+    )
+
     # =========================================================
     # COVER PAGE
     # =========================================================
-    _report_date = datetime.now().strftime("%B %d, %Y")
+    _now = datetime.now()
+    _report_date = _now.strftime("%B %d, %Y")
+    _report_ts = _now.strftime("%B %d, %Y at %I:%M %p").replace(" 0", " ")
     cover_html = f"""
     <section class="cover">
       <div class="cover-inner">
@@ -252,7 +410,8 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           <div class="cover-brand">Techmore</div>
           <div class="cover-rule"></div>
           <div class="cover-title">Network Health &amp;<br>Optimization Report</div>
-          <div class="cover-subtitle">{org_name}</div>
+          <div class="cover-subtitle">{_he(org_name)}</div>
+          <div class="cover-run-ts">Generated {_report_ts}</div>
         </div>
         <div class="cover-bottom">
           <div class="cover-bottom-rule"></div>
@@ -468,27 +627,8 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
       </table>
 
       <h2>Health at a Glance</h2>
+      {health_grid_html}
       {render_kpi_row(kpi_items)}
-
-      <div class="summary-card">
-        <div class="summary-title">Key Findings</div>
-        <div class="summary-body">
-          <ul>
-            <li><strong>{online_count}</strong> of <strong>{total_devices}</strong> devices
-                are currently online ({availability_pct}% availability)</li>
-            <li><strong>{len(high_util_devices)}</strong> access point(s) operating at high
-                channel utilization (&gt;70%), which may degrade wireless throughput and latency</li>
-            <li><strong>{len(switch_port_issues)}</strong> switch port issue(s) detected
-                based primarily on errors and potentially constrained uplink speeds</li>
-            <li><strong>{len(config_issues)}</strong> configuration
-                anomal{'y' if len(config_issues) == 1 else 'ies'} found in switch port settings</li>
-            <li><strong>{len(poe_switches)}</strong> switch(es) with active PoE loads
-                tracked over 24 hours</li>
-            <li><strong>{len(top_models)}</strong> distinct hardware model entries observed in the
-                inventory summary, reinforcing the need for lifecycle standardization</li>
-          </ul>
-        </div>
-      </div>
     </section>
     """
 
@@ -1143,7 +1283,6 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # =========================================================
     # SECTION 9: LICENSING SUMMARY
     # =========================================================
-    licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
     licensing_mode = (
         licensing_data.get("licenseMode")
         if isinstance(licensing_data, dict)
@@ -1382,16 +1521,28 @@ def main() -> int:
                         org_name = m.group(1)
 
         log.info("Generating report for: %s", org_name)
+        _run_ts = datetime.now()
         body = build_org_report(org_dir, org_name)
         html = build_html(f"{org_name} — Network Health Report", body)
 
-        html_path = os.path.join(org_dir, "report.html")
-        pdf_path = os.path.join(org_dir, "report.pdf")
+        _slug = re.sub(r"[^\w]+", "_", org_name).strip("_")
+        _stamp = _run_ts.strftime("%Y-%m-%d_%H%M")
+        html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_report.html")
+        pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_report.pdf")
+        # Stable aliases so downstream scripts and run.sh always find report.html/pdf
+        html_alias = os.path.join(org_dir, "report.html")
+        pdf_alias  = os.path.join(org_dir, "report.pdf")
+
         with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        # Overwrite alias (plain copy — no symlinks for cross-platform safety)
+        with open(html_alias, "w", encoding="utf-8") as f:
             f.write(html)
 
         ok = write_pdf(html_path, pdf_path)
         if ok:
+            import shutil
+            shutil.copy2(pdf_path, pdf_alias)
             log.info("PDF → %s", pdf_path)
         else:
             log.info("HTML → %s  (no PDF tool found)", html_path)

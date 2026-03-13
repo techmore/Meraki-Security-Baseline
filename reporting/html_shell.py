@@ -141,8 +141,15 @@ def build_html(doc_title: str, body: str) -> str:
     .cover-subtitle {{
       font-size: 18px;
       color: var(--olive-200);
-      margin-bottom: 48px;
+      margin-bottom: 12px;
       opacity: 0.9;
+    }}
+    .cover-run-ts {{
+      font-size: 11px;
+      color: var(--olive-200);
+      opacity: 0.6;
+      margin-bottom: 48px;
+      letter-spacing: 0.3px;
     }}
     .cover-meta-row {{
       display: flex;
@@ -603,6 +610,69 @@ def build_html(doc_title: str, body: str) -> str:
     }}
 
     /* =====================================================
+       HEALTH AT A GLANCE GRID
+       ===================================================== */
+    .health-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin: 16px 0 20px;
+    }}
+    .health-card {{
+      border: 1px solid var(--line);
+      background: var(--stone-50);
+      border-radius: 10px;
+      padding: 14px 14px 12px;
+      position: relative;
+      overflow: hidden;
+    }}
+    .health-card::before {{
+      content: '';
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 3px;
+    }}
+    .health-card--good::before  {{ background: #22c55e; }}
+    .health-card--warn::before  {{ background: #f59e0b; }}
+    .health-card--crit::before  {{ background: #ef4444; }}
+    .health-card--info::before  {{ background: var(--olive-400); }}
+    .health-card-header {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }}
+    .health-card-icon {{
+      font-size: 16px;
+      line-height: 1;
+    }}
+    .health-card-domain {{
+      font-size: 8.5px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }}
+    .health-card-stat {{
+      font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1.1;
+    }}
+    .health-card--crit .health-card-stat  {{ color: #dc2626; }}
+    .health-card--warn .health-card-stat  {{ color: #b45309; }}
+    .health-card--good .health-card-stat  {{ color: #15803d; }}
+    .health-card-detail {{
+      font-size: 9px;
+      color: var(--muted);
+      margin-top: 3px;
+    }}
+    @media print {{
+      .health-grid {{ grid-template-columns: repeat(4, 1fr); }}
+    }}
+
+    /* =====================================================
        KPI ROW
        ===================================================== */
     .kpi-row {{
@@ -934,6 +1004,32 @@ def build_html(doc_title: str, body: str) -> str:
     }}
     table.data tr:hover td {{
       background: var(--olive-50);
+    }}
+    /* Dense variant — used in AP interference and other high-row sections */
+    table.data.dense th {{
+      padding: 5px 8px;
+      font-size: 8px;
+    }}
+    table.data.dense td {{
+      padding: 4px 8px;
+      font-size: 10px;
+    }}
+    /* AP interference section: reduce left margin so wide tables fit in PDF */
+    #ap-interference {{
+      padding-left: 0;
+    }}
+    @media print {{
+      #ap-interference {{
+        margin-left: -8px;
+        margin-right: -8px;
+      }}
+      #ap-interference table.data.dense {{
+        font-size: 8.5px;
+      }}
+      #ap-interference table.data.dense th,
+      #ap-interference table.data.dense td {{
+        padding: 3px 6px;
+      }}
     }}
     /* =====================================================
        NETWORK TOPOLOGY

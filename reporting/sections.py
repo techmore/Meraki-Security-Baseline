@@ -512,9 +512,9 @@ def _build_ap_interference_section(
             f"""
       <div class="building-section">
         <h3>{_he(switch_serial)}</h3>
-        <table class="data">
+        <table class="data dense">
           <thead>
-            <tr><th>Switch Port</th><th>AP</th><th>Severity</th><th>Worst Band</th><th>Non-WiFi</th><th>Total</th><th>Assoc</th><th>AP Findings</th></tr>
+            <tr><th>Port</th><th>AP</th><th>Severity</th><th>Band</th><th>Non-WiFi</th><th>Total</th><th>Assoc</th><th>AP Findings</th></tr>
           </thead>
           <tbody>{rows}</tbody>
         </table>
@@ -566,10 +566,10 @@ def _build_ap_interference_section(
       <p>This section converts Meraki channel-utilization telemetry into an RF interference view by site and by AP. `non-Wi-Fi` represents likely external RF noise, while `Wi-Fi` represents airtime consumed by neighboring WLAN activity and co-channel contention. Where exact AP neighbor telemetry is unavailable, neighbor pressure is inferred from high Wi-Fi airtime on the affected band.</p>
       {''.join(site_cards)}
       <h2>Priority AP Findings</h2>
-      <table class="data">
+      <table class="data dense">
         <thead>
           <tr>
-            <th>Site</th><th>AP</th><th>Severity</th><th>Worst Band</th><th>Non-WiFi</th>
+            <th>Site</th><th>AP</th><th>Severity</th><th>Band</th><th>Non-WiFi</th>
             <th>WiFi</th><th>Total</th><th>Assoc</th><th>Findings</th><th>Recommendations</th>
           </tr>
         </thead>
@@ -582,7 +582,7 @@ def _build_ap_interference_section(
       <h2>AP Deep Dive By Switch</h2>
       {''.join(ap_deep_dive_parts) if ap_deep_dive_parts else '<div class="summary-card"><div class="summary-body">AP-to-switch mapping was not available in the current telemetry, so AP deep dives could not yet be grouped by switch.</div></div>'}
       <h2>Diagnostic Dump</h2>
-      <table class="data">
+      <table class="data dense">
         <thead>
           <tr><th>Site</th><th>AP</th><th>Serial</th><th>Avg Non-WiFi</th><th>Avg Total</th><th>Assoc</th><th>Auth</th><th>Success</th></tr>
         </thead>
