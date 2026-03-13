@@ -914,6 +914,32 @@ def _build_switch_link_narrative(
     return ". ".join(parts) + "."
 
 
+def _model_capability_summary(model: str) -> str:
+    text = (model or "").upper()
+    if text.startswith("MX"):
+        return "Security gateway with firewalling, AutoVPN, WAN failover, and internet edge policy enforcement."
+    if text.startswith("MS130") or text.startswith("MS120"):
+        return "Access-layer switching with PoE variants, Layer 2 VLAN services, and campus edge connectivity."
+    if text.startswith("MS2") or text.startswith("MS3") or text.startswith("MS4"):
+        return "Switching platform for access/distribution roles with VLAN trunking, uplink aggregation, and PoE model options."
+    if text.startswith("MR") or text.startswith("CW"):
+        return "Cloud-managed wireless AP with RF management, roaming support, and modern client access capabilities."
+    if text.startswith("MV"):
+        return "Security camera with onboard retention and cloud-managed visibility."
+    if text.startswith("MT"):
+        return "Environmental / telemetry sensor integrated into the Meraki dashboard."
+    return "Managed network device model present in the current inventory."
+
+
+def _hardware_consistency_note(top_models: List[Any]) -> str:
+    unique_models = len(top_models)
+    if unique_models >= 10:
+        return "The environment spans many hardware generations. Standardizing refresh waves and narrowing active model families will simplify spares, firmware planning, and supportability."
+    if unique_models >= 5:
+        return "The environment mixes several hardware generations. Aligning future upgrades by layer will improve lifecycle consistency and reduce operational variance."
+    return "The hardware profile is relatively consistent. Preserve that consistency during refresh cycles so features, support windows, and operational behavior remain predictable."
+
+
 def _port_heat_score(port: Dict[str, Any]) -> float:
     usage = port.get("usageInKb") or {}
     traffic = port.get("trafficInKbps") or {}
@@ -937,6 +963,27 @@ def _port_heat_label(score: float) -> str:
     if score >= 15:
         return "Cool"
     return "Idle"
+
+
+def _speed_label(speed: str) -> str:
+    if speed.startswith("10 "):
+        return "10M"
+    if speed.startswith("100 "):
+        return "100M"
+    if speed.startswith("2.5 "):
+        return "2.5G"
+    if speed.startswith("5 "):
+        return "5G"
+    if speed.startswith("10 G"):
+        return "10G"
+    if speed.startswith("25 G"):
+        return "25G"
+    return "1G"
+
+
+def _is_sfp_like_port(port_id: str) -> bool:
+    text = str(port_id or "").upper()
+    return "_" in text or text.startswith("SFP") or "NM" in text or text.startswith("X")
 
 
 def _render_switch_port_grid(
@@ -978,21 +1025,17 @@ def _render_switch_port_grid(
             counts["unused"] += 1
         else:
             counts["endpoint"] += 1
-        speed_label = "1G"
-        if speed.startswith("10 "):
-            speed_label = "10M"
-        elif speed.startswith("100 "):
-            speed_label = "100M"
-        elif speed.startswith("2.5 "):
-            speed_label = "2.5G"
-        elif speed.startswith("5 "):
-            speed_label = "5G"
-        elif speed.startswith("10 G"):
-            speed_label = "10G"
+        speed_label = _speed_label(speed)
+        speed_cls = ""
+        if speed_label in ("2.5G", "5G"):
+            speed_cls = "speed-mgig"
+        elif speed_label in ("10G", "25G"):
+            speed_cls = "speed-uplink"
+        sfp_cls = " sfp-port" if _is_sfp_like_port(port_id) else ""
         grouped.setdefault(_port_group_label(port_id), []).append(
-            f'<div class="switch-port-cell {cls}" title="{_he(port_id)} - { _he(role) }">'
+            f'<div class="switch-port-cell {cls}{sfp_cls} {speed_cls}" title="{_he(port_id)} - {_he(role)} - {_he(speed or "Unknown")}">'
             f'<span class="switch-port-num">{_he(port_id)}</span>'
-            f'<span class="switch-port-meta">{_he(_port_role_short(role))} { _he(speed_label) if status and cls != "down" else "" }</span>'
+            f'<span class="switch-port-meta">{_he(_port_role_short(role))} {_he(speed_label) if status and cls != "down" else ""}</span>'
             f"</div>"
         )
     summary = (
@@ -1005,8 +1048,17 @@ def _render_switch_port_grid(
     )
     groups_html = []
     for label, cells in grouped.items():
+        midpoint = max(1, math.ceil(len(cells) / 2))
+        group_kind = "SFP / Module" if label != "Front Panel" else "Front Panel"
+        row_one = "".join(cells[:midpoint])
+        row_two = "".join(cells[midpoint:])
         groups_html.append(
-            f'<div class="switch-port-group"><div class="switch-port-group-title">{_he(label)}</div><div class="switch-port-grid">{"".join(cells)}</div></div>'
+            f'<div class="switch-port-group">'
+            f'<div class="switch-port-group-title">{_he(label)} <span class="switch-port-group-kind">{_he(group_kind)}</span></div>'
+            f'<div class="switch-port-face">'
+            f'<div class="switch-port-row">{row_one}</div>'
+            f'{f"<div class=\"switch-port-row\">{row_two}</div>" if row_two else ""}'
+            f"</div></div>"
         )
     return summary + "".join(groups_html)
 
@@ -1039,7 +1091,7 @@ def _build_switch_detail_section(
         return (
             """
     <section id="switch-deep-dive" class="report-section">
-      <h1>13. Switch Deep Dive</h1>
+      <h1>14. Switch Deep Dive</h1>
       <div class="summary-card"><div class="summary-body">No switch inventory was available for detailed port-level analysis.</div></div>
     </section>
     """,
@@ -1059,7 +1111,7 @@ def _build_switch_detail_section(
     section_parts = [
         """
     <section id="switch-deep-dive" class="report-section">
-      <h1>13. Switch Deep Dive</h1>
+      <h1>14. Switch Deep Dive</h1>
       <p>Port-level views for each MS switch, including link status, negotiated speed, traffic, PoE draw, inferred connected device, and upstream/downstream placement in the switching tree.</p>
     </section>
     """
@@ -1194,6 +1246,9 @@ def _build_switch_detail_section(
           <span><i class="swatch warn"></i>low speed / warning</span>
           <span><i class="swatch issue"></i>error</span>
           <span><i class="swatch down"></i>down</span>
+          <span><i class="swatch speed-mgig"></i>2.5G / multi-gig</span>
+          <span><i class="swatch speed-uplink"></i>10G+ / high-speed uplink</span>
+          <span><i class="swatch sfp"></i>SFP / module port</span>
         </div>
       </div>
       <table class="data switch-detail-table">
@@ -1411,7 +1466,7 @@ def _build_ap_interference_section(
 
     return f"""
     <section id="ap-interference" class="report-section">
-      <h1>11. AP Interference Audit</h1>
+      <h1>12. AP Interference Audit</h1>
       <p>This section converts Meraki channel-utilization telemetry into an RF interference view by site and by AP. `non-Wi-Fi` represents likely external RF noise, while `Wi-Fi` represents airtime consumed by neighboring WLAN activity and co-channel contention. Where exact AP neighbor telemetry is unavailable, neighbor pressure is inferred from high Wi-Fi airtime on the affected band.</p>
       {''.join(site_cards)}
       <h2>Priority AP Findings</h2>
@@ -1435,6 +1490,131 @@ def _build_ap_interference_section(
         </thead>
         <tbody>{diagnostic_rows}</tbody>
       </table>
+    </section>
+    """
+
+
+def _build_wan_capacity_section(
+    uplink_statuses: Any,
+    devices_avail: List[Dict[str, Any]],
+    networks_by_id: Dict[str, Dict[str, Any]],
+) -> str:
+    if not isinstance(uplink_statuses, list) or not uplink_statuses:
+        return """
+    <section id="wan-capacity" class="report-section">
+      <h1>11. Internet Capacity &amp; Utilization</h1>
+      <div class="summary-card"><div class="summary-body">No WAN uplink telemetry was available in this backup.</div></div>
+    </section>
+    """
+
+    device_by_serial = {
+        d.get("serial"): d for d in devices_avail if isinstance(d, dict) and d.get("serial")
+    }
+    rows = []
+    summary = {"active": 0, "ready": 0, "failed": 0, "unknown_speed": 0}
+    recommendation_flags = {"missing_speed": False, "degraded": False}
+    for device in uplink_statuses:
+        if not isinstance(device, dict):
+            continue
+        serial = device.get("serial")
+        dev = device_by_serial.get(serial, {})
+        net_id = device.get("networkId") or ((dev.get("network") or {}).get("id"))
+        site_name = (networks_by_id.get(net_id) or {}).get("name") or "Unassigned"
+        for uplink in device.get("uplinks", []) or []:
+            if not isinstance(uplink, dict):
+                continue
+            status = str(uplink.get("status") or "unknown").lower()
+            speed = uplink.get("speed")
+            interface = uplink.get("interface") or "wan"
+            if status == "active":
+                summary["active"] += 1
+            elif status == "ready":
+                summary["ready"] += 1
+            else:
+                summary["failed"] += 1
+                recommendation_flags["degraded"] = True
+            if not speed:
+                summary["unknown_speed"] += 1
+                recommendation_flags["missing_speed"] = True
+            max_capacity = str(speed or "Unknown")
+            sustain = "Current snapshot only"
+            peak = "Historical peak not collected"
+            freq = "Usage frequency unavailable"
+            score = 100 if status == "active" else 72 if status == "ready" else 28
+            rows.append(
+                {
+                    "site": site_name,
+                    "device": dev.get("name") or serial or "MX",
+                    "model": device.get("model") or dev.get("model") or "",
+                    "interface": interface,
+                    "status": status.title(),
+                    "public_ip": uplink.get("publicIp") or uplink.get("ip") or "—",
+                    "max_capacity": max_capacity,
+                    "sustain": sustain,
+                    "peak": peak,
+                    "frequency": freq,
+                    "score": score,
+                }
+            )
+
+    rows.sort(key=lambda item: (item["site"], item["device"], item["interface"]))
+    graph_rows = "".join(
+        "<div class=\"wan-capacity-row\">"
+        f"<div class=\"wan-capacity-label\">{_he(item['site'])} / {_he(item['device'])} / {_he(item['interface'])}</div>"
+        f"<div class=\"wan-capacity-bar\"><span style=\"width:{item['score']}%\"></span></div>"
+        f"<div class=\"wan-capacity-meta\">{_he(item['status'])} &middot; Max speed: {_he(item['max_capacity'])}</div>"
+        "</div>"
+        for item in rows
+    )
+    table_rows = "".join(
+        "<tr>"
+        f"<td>{_he(item['site'])}</td>"
+        f"<td>{_he(item['device'])}<br><code>{_he(item['model'])}</code></td>"
+        f"<td>{_he(item['interface'])}</td>"
+        f"<td>{_he(item['status'])}</td>"
+        f"<td>{_he(item['max_capacity'])}</td>"
+        f"<td>{_he(item['sustain'])}</td>"
+        f"<td>{_he(item['peak'])}</td>"
+        f"<td>{_he(item['frequency'])}</td>"
+        f"<td>{_he(item['public_ip'])}</td>"
+        "</tr>"
+        for item in rows
+    )
+    recommendations = []
+    if recommendation_flags["missing_speed"]:
+        recommendations.append("The current backup contains uplink state but not negotiated or subscribed WAN bandwidth for one or more circuits. Add Meraki appliance uplink usage/history endpoints so the report can show sustained throughput and true peak demand.")
+    if recommendation_flags["degraded"]:
+        recommendations.append("At least one WAN uplink is not active. Review failover policy, ISP health, and MX uplink preferences before release.")
+    if not recommendations:
+        recommendations.append("WAN links appear healthy in the current snapshot. To validate circuit sizing, add historical usage collection so peak and sustained demand can be compared against contracted bandwidth.")
+
+    return f"""
+    <section id="wan-capacity" class="report-section">
+      <h1>11. Internet Capacity &amp; Utilization</h1>
+      <p>This section summarizes current MX WAN uplink state and the maximum internet capacity exposed by the current backup. The present dataset is a live-state snapshot; it can show WAN status and any reported link speed, but it does not yet include historical throughput curves for sustained load, peak load windows, or usage frequency over time.</p>
+      <div class="summary-card">
+        <div class="summary-title">WAN Snapshot</div>
+        <div class="summary-body">
+          Active uplinks: <strong>{summary['active']}</strong> &nbsp;|&nbsp;
+          Warm standby / ready: <strong>{summary['ready']}</strong> &nbsp;|&nbsp;
+          Degraded / other: <strong>{summary['failed']}</strong> &nbsp;|&nbsp;
+          Unknown speed circuits: <strong>{summary['unknown_speed']}</strong>
+        </div>
+      </div>
+      <div class="wan-capacity-chart">{graph_rows}</div>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Site</th><th>MX / Uplink</th><th>Interface</th><th>Status</th><th>Max Capacity</th>
+            <th>Sustained Load</th><th>Peak Load</th><th>Usage Frequency</th><th>Public IP</th>
+          </tr>
+        </thead>
+        <tbody>{table_rows}</tbody>
+      </table>
+      <div class="summary-card">
+        <div class="summary-title">What Is Missing For True Capacity Planning</div>
+        <div class="summary-body"><ul>{''.join(f'<li>{_he(item)}</li>' for item in recommendations)}</ul></div>
+      </div>
     </section>
     """
 
@@ -1478,6 +1658,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     switch_port_configs_by_switch = (
         load_json(os.path.join(org_dir, "switch_port_configs.json")) or {}
     )
+    uplink_statuses = load_json(os.path.join(org_dir, "uplink_statuses.json")) or []
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -1545,6 +1726,9 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
             port_errors = port.get("errors") or []  # always a list
             if isinstance(port_errors, str):
                 port_errors = [port_errors]
+            port_warnings = port.get("warnings") or []
+            if isinstance(port_warnings, str):
+                port_warnings = [port_warnings]
             speed_raw = port.get("speed") or ""
             # speed may be "10 Mbps", "100 Mbps", 10, 100, etc.
             speed_num = None
@@ -1552,11 +1736,11 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
                 speed_num = int(str(speed_raw).split()[0])
             except (ValueError, IndexError):
                 pass
+            is_uplink = bool(port.get("isUplink"))
             if any(
                 [
                     bool(port_errors),
-                    speed_num in [10, 100],
-                    port.get("duplex") == "half",
+                    is_uplink and speed_num in [10, 100],
                 ]
             ):
                 switch_port_issues.append(
@@ -1565,10 +1749,12 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
                         "port": port.get("portId", "Unknown"),
                         "errors": port_errors,          # list of strings
                         "error_count": len(port_errors),
+                        "warning_count": len(port_warnings),
                         "speed": speed_raw,
                         "duplex": port.get("duplex", "Unknown"),
                         "poeMode": port.get("poeMode", "Unknown"),
                         "status": port.get("status", "Unknown"),
+                        "isUplink": is_uplink,
                     }
                 )
 
@@ -1615,6 +1801,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     # Inventory summary
     inv_by_type = inventory_summary.get("by_type") or {}
+    top_models = inventory_summary.get("top_models") or []
     total_devices = sum(inv_by_type.values()) if inv_by_type else len(devices_avail)
 
     # KPI items
@@ -1684,6 +1871,11 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         channel_util,
         wireless_stats,
     )
+    wan_capacity_html = _build_wan_capacity_section(
+        uplink_statuses,
+        devices_avail,
+        networks_by_id,
+    )
     toc_switch_subitems = "".join(
         f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
         for anchor, label in toc_switch_items
@@ -1737,14 +1929,18 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </li>
         <li>
           <span class="toc-num">11</span>
-          <span class="toc-entry">AP Interference Audit</span>
+          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
         </li>
         <li>
           <span class="toc-num">12</span>
-          <span class="toc-entry">Client Analysis</span>
+          <span class="toc-entry">AP Interference Audit</span>
         </li>
         <li>
           <span class="toc-num">13</span>
+          <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">14</span>
           <span class="toc-entry">Switch Deep Dive</span>
           <ol class="toc-sub">
             {toc_switch_subitems}
@@ -1795,7 +1991,25 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           networking across <strong>{len(devices_by_network)}</strong> site(s). The network delivers
           secure internet access, segmented LAN connectivity, and wireless coverage for end users
           and devices. All infrastructure is cloud-managed via the Meraki Dashboard, providing
-          centralized visibility, automated firmware management, and real-time alerting.
+          centralized visibility, automated firmware management, and real-time alerting. From an
+          architecture standpoint, the value of this environment depends heavily on orderly upgrade
+          cycles and consistent hardware tiers: edge/security appliances should be refreshed before
+          support windows become a risk, switching should be upgraded in coherent distribution/access
+          phases, and wireless generations should remain reasonably aligned so client experience and
+          RF behavior are predictable across buildings. {_hardware_consistency_note(top_models)}
+        </div>
+      </div>
+
+      <div class="summary-card">
+        <div class="summary-title">Lifecycle &amp; Upgrade Planning</div>
+        <div class="summary-body">
+          Meraki environments age unevenly when older MX, MS, and MR families remain in service
+          beside newer platforms. That creates mismatched uplink speeds, inconsistent PoE behavior,
+          mixed firmware support horizons, and uneven client capabilities. For this reason, upgrade
+          planning should prioritize hardware consistency by role: keep core/distribution switching
+          on the highest-capacity supported models, standardize access switching where possible, and
+          refresh older AP generations in site-based waves so roaming, airtime policy, and client
+          throughput remain predictable.
         </div>
       </div>
 
@@ -1849,11 +2063,13 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
             <li><strong>{len(high_util_devices)}</strong> access point(s) operating at high
                 channel utilization (&gt;70%), which may degrade wireless throughput and latency</li>
             <li><strong>{len(switch_port_issues)}</strong> switch port issue(s) detected
-                including frame errors, sub-gigabit speeds, or half-duplex conditions</li>
+                based primarily on errors and potentially constrained uplink speeds</li>
             <li><strong>{len(config_issues)}</strong> configuration
                 anomal{'y' if len(config_issues) == 1 else 'ies'} found in switch port settings</li>
             <li><strong>{len(poe_switches)}</strong> switch(es) with active PoE loads
                 tracked over 24 hours</li>
+            <li><strong>{len(top_models)}</strong> distinct hardware model entries observed in the
+                inventory summary, reinforcing the need for lifecycle standardization</li>
           </ul>
         </div>
       </div>
@@ -1921,6 +2137,27 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           {"".join(network_overview_rows)}
         </tbody>
       </table>
+      <h2>Model Inventory &amp; Capabilities</h2>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Model</th><th>Count</th><th>Capability Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          {"".join(f"<tr><td>{_he(model)}</td><td>{count}</td><td>{_he(_model_capability_summary(model))}</td></tr>" for model, count in top_models[:12])}
+        </tbody>
+      </table>
+      <div class="summary-card">
+        <div class="summary-title">PoE Budget Note</div>
+        <div class="summary-body">
+          Current backups include measured PoE consumption and per-port allocation signals, but
+          they do not yet include authoritative switch maximum PoE budget values. The report can
+          therefore show actual draw and PoE-heavy switches today, but budget headroom remains an
+          API collection gap that should be added to the backup pipeline before final capacity
+          planning or switch replacement decisions are made.
+        </div>
+      </div>
     </section>
     """
 
@@ -2103,18 +2340,12 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
                 def _speed_num(s):
                     try: return int(str(s).split()[0])
                     except (ValueError, IndexError): return None
-                low_speed = [i for i in sw_issues if _speed_num(i.get("speed")) in [10, 100]]
-                half_dup = [i for i in sw_issues if i.get("duplex") == "half"]
+                low_speed = [i for i in sw_issues if i.get("isUplink") and _speed_num(i.get("speed")) in [10, 100]]
                 err_ports = [i for i in sw_issues if i.get("error_count", 0) > 0]
                 if low_speed:
                     bottlenecks.append(
-                        f"{len(low_speed)} port(s) at sub-gigabit speed &mdash; "
-                        f"bandwidth ceiling for connected devices"
-                    )
-                if half_dup:
-                    bottlenecks.append(
-                        f"{len(half_dup)} port(s) in half-duplex &mdash; "
-                        f"collisions reduce effective throughput by up to 50%"
+                        f"{len(low_speed)} uplink port(s) negotiating below 1 Gbps &mdash; "
+                        f"review cabling, optics, or expected circuit handoff speed"
                     )
                 if err_ports:
                     bottlenecks.append(
@@ -2621,7 +2852,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     client_analysis_html = f"""
     <section id="client-analysis" class="report-section">
-      <h1>12. Client Analysis</h1>
+      <h1>13. Client Analysis</h1>
       <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
          in this backup. Wired client detail requires switch port client data which is not
          collected in the current pipeline.</p>
@@ -2642,6 +2873,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         + recommendations_html
         + cis8_html
         + licensing_html
+        + wan_capacity_html
         + ap_interference_html
         + client_analysis_html
         + switch_deep_dive_html
@@ -2674,7 +2906,7 @@ def build_html(doc_title: str, body: str) -> str:
       margin: 0;
     }}
     @page {{
-      margin: 28mm 22mm;
+      margin: 18mm 12mm;
     }}
     :root {{
       --bg: #ffffff;
@@ -2907,8 +3139,8 @@ def build_html(doc_title: str, body: str) -> str:
        REPORT SECTIONS
        ===================================================== */
     .report-section {{
-      padding: 28px 64px 40px;
-      max-width: 900px;
+      padding: 18px 18px 26px;
+      max-width: none;
     }}
     /* Executive summary occupies its own full page */
     .exec-full-page {{
@@ -3060,12 +3292,6 @@ def build_html(doc_title: str, body: str) -> str:
       margin-bottom: 10px;
       color: var(--ink);
     }}
-    .switch-port-grid {{
-      display: grid;
-      grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 6px;
-      margin-top: 10px;
-    }}
     .switch-port-summary {{
       display: flex;
       flex-wrap: wrap;
@@ -3084,6 +3310,28 @@ def build_html(doc_title: str, body: str) -> str:
       color: var(--muted);
       margin-bottom: 7px;
       font-weight: 700;
+    }}
+    .switch-port-group-kind {{
+      margin-left: 8px;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+      opacity: 0.7;
+    }}
+    .switch-port-face {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f8fafc;
+      padding: 10px;
+    }}
+    .switch-port-row {{
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
+      gap: 6px;
+      margin-top: 6px;
+    }}
+    .switch-port-row:first-child {{
+      margin-top: 0;
     }}
     .switch-port-cell {{
       border-radius: 6px;
@@ -3117,6 +3365,16 @@ def build_html(doc_title: str, body: str) -> str:
     .switch-port-cell.warn {{ background: #fef3c7; border-color: #fcd34d; }}
     .switch-port-cell.issue {{ background: #fee2e2; border-color: #fca5a5; }}
     .switch-port-cell.down {{ background: #e5e7eb; border-color: #cbd5e1; color: #6b7280; }}
+    .switch-port-cell.sfp-port {{
+      border-style: dashed;
+      border-width: 2px;
+    }}
+    .switch-port-cell.speed-mgig {{
+      box-shadow: inset 0 0 0 2px rgba(14, 165, 233, 0.22);
+    }}
+    .switch-port-cell.speed-uplink {{
+      box-shadow: inset 0 0 0 2px rgba(234, 88, 12, 0.24);
+    }}
     .switch-detail-grid-empty {{
       color: var(--muted);
       font-size: 12px;
@@ -3148,8 +3406,43 @@ def build_html(doc_title: str, body: str) -> str:
     .switch-detail-legend .swatch.warn {{ background: #fef3c7; }}
     .switch-detail-legend .swatch.issue {{ background: #fee2e2; }}
     .switch-detail-legend .swatch.down {{ background: #e5e7eb; }}
+    .switch-detail-legend .swatch.speed-mgig {{ background: #dbeafe; box-shadow: inset 0 0 0 2px rgba(14, 165, 233, 0.22); }}
+    .switch-detail-legend .swatch.speed-uplink {{ background: #fed7aa; box-shadow: inset 0 0 0 2px rgba(234, 88, 12, 0.24); }}
+    .switch-detail-legend .swatch.sfp {{ background: white; border-style: dashed; border-width: 2px; }}
     .switch-detail-table td {{
       vertical-align: top;
+    }}
+    .wan-capacity-chart {{
+      margin: 16px 0 22px;
+      display: grid;
+      gap: 10px;
+    }}
+    .wan-capacity-row {{
+      display: grid;
+      grid-template-columns: minmax(200px, 280px) 1fr minmax(180px, 240px);
+      gap: 12px;
+      align-items: center;
+      font-size: 11px;
+    }}
+    .wan-capacity-label {{
+      color: var(--ink);
+      font-weight: 600;
+    }}
+    .wan-capacity-meta {{
+      color: var(--muted);
+      text-align: right;
+    }}
+    .wan-capacity-bar {{
+      height: 12px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+    }}
+    .wan-capacity-bar span {{
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #94a3b8, #0ea5e9);
+      border-radius: 999px;
     }}
 
     /* =====================================================
