@@ -8,6 +8,8 @@ cd "$(dirname "$0")"
 CUSTOM_MODEL=""
 REPORT_ONLY=0
 NO_AI_REVIEW=0
+FORCE_REFRESH=0
+CACHE_AGE=12
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model|-m)
@@ -22,21 +24,30 @@ while [[ $# -gt 0 ]]; do
       NO_AI_REVIEW=1
       shift
       ;;
+    --force-refresh)
+      FORCE_REFRESH=1
+      shift
+      ;;
+    --cache-age)
+      CACHE_AGE="${2:-12}"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: ./run.sh [--model <ollama-model>] [--report-only] [--no-ai-review]"
+      echo "Usage: ./run.sh [options]"
       echo ""
-      echo "  -m, --model    Override the Ollama model used for AI review"
-      echo "                 Default: qwen3.5:9b"
-      echo "      --report-only"
-      echo "                 Skip API collection and build from existing backups/"
-      echo "      --no-ai-review"
-      echo "                 Skip the Ollama review stage"
+      echo "  -m, --model <model>  Override the Ollama model used for AI review"
+      echo "                       Default: qwen3.5:9b"
+      echo "      --report-only    Skip API collection and build from existing backups/"
+      echo "      --no-ai-review   Skip the Ollama review stage"
+      echo "      --force-refresh  Re-fetch all Meraki API data, ignoring cached files"
+      echo "      --cache-age <h>  Max age in hours for cached backup files (default: 12)"
       echo ""
       echo "  Examples:"
       echo "    ./run.sh"
       echo "    ./run.sh --model qwen3.5:27b"
-      echo "    ./run.sh -m gemma3:12b"
       echo "    ./run.sh --report-only"
+      echo "    ./run.sh --force-refresh           # full re-fetch"
+      echo "    ./run.sh --cache-age 6             # treat files >6h old as stale"
       echo "    ./run.sh --report-only --no-ai-review"
       exit 0
       ;;
@@ -215,8 +226,15 @@ run_stage() {
   _spinner "$script" "$previous_duration" &
   local spin_pid=$!
 
+  # Build extra args for stages that support them
+  local extra_args=()
+  if [[ "$script" == "meraki_backup.py" ]]; then
+    (( FORCE_REFRESH == 1 )) && extra_args+=("--force-refresh")
+    extra_args+=("--cache-age" "$CACHE_AGE")
+  fi
+
   set +e
-  python3 "$script" > "$tmp" 2>&1
+  python3 "$script" "${extra_args[@]}" > "$tmp" 2>&1
   local exit_code=$?
   set -e
 

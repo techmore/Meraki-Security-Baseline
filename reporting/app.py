@@ -12,6 +12,7 @@ from .common import (
     _hardware_consistency_note,
     _model_capability_summary,
     build_fallback_security_checks,
+    check_backup_schema,
     find_org_dirs,
     load_json,
     md_to_html,
@@ -31,6 +32,19 @@ log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str:
+    # ── Schema compatibility check ────────────────────────────────────────────
+    _schema_warnings = check_backup_schema(org_dir)
+    _schema_banner = ""
+    if _schema_warnings:
+        for _w in _schema_warnings:
+            log.warning("Schema: %s", _w)
+        _schema_banner = (
+            '<div class="schema-warning-banner">'
+            "<strong>⚠ Backup compatibility notice:</strong> "
+            + " ".join(_he(w) for w in _schema_warnings)
+            + "</div>"
+        )
+
     rec_path = os.path.join(org_dir, "recommendations.md")
     rec_md = ""
     if os.path.exists(rec_path):
@@ -1991,6 +2005,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     return (
         cover_html
+        + _schema_banner
         + toc_html
         + exec_html
         + network_overview_html

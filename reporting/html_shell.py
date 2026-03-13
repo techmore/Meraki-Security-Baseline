@@ -808,6 +808,16 @@ def build_html(doc_title: str, body: str) -> str:
     .text-crit {{ color: #dc3545; font-weight: 600; }}
     .text-warn  {{ color: #d97706; font-weight: 600; }}
     .text-good  {{ color: #28a745; font-weight: 600; }}
+    /* Backup schema compatibility warning */
+    .schema-warning-banner {{
+      background: #fff8e1;
+      border-left: 4px solid #f59e0b;
+      color: #78350f;
+      padding: 10px 16px;
+      font-size: 12px;
+      margin: 0 0 16px;
+    }}
+    @media print {{ .schema-warning-banner {{ display: none; }} }}
 
     /* =====================================================
        CHARTS

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import logging
 import os
@@ -9,8 +10,8 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
-from datetime import datetime
-from typing import TextIO
+from datetime import datetime, timezone
+from typing import Callable, TextIO
 from typing import Dict, Any, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -22,6 +23,12 @@ BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
 BACKUPS_DIR       = os.path.join(BASE_DIR, "backups")
 _REQUEST_TIMEOUT  = int(os.getenv("MERAKI_REQUEST_TIMEOUT", "30"))   # seconds per call
 _MAX_RETRIES      = int(os.getenv("MERAKI_MAX_RETRIES",     "5"))    # 429 retries
+
+# ── Schema versioning ────────────────────────────────────────────────────────
+# Increment when backup file shapes change (new keys, renamed files, type changes).
+# report_generator.py compares against EXPECTED_BACKUP_SCHEMA_VERSION in common.py.
+BACKUP_SCHEMA_VERSION = 1
+PIPELINE_VERSION      = "1.2"
 
 # ── Timespan / pagination constants ─────────────────────────────────────────
 TIMESPAN_1H   =   3_600   # seconds
@@ -197,6 +204,26 @@ def fetch_licensing_overview(org_id: str, api_key: str) -> Tuple[Any, Optional[s
 def write_json(path: str, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def _cache_is_fresh(path: str, max_age_h: float = 12.0, force: bool = False) -> bool:
+    """Return True if path exists, is readable JSON, and is younger than max_age_h hours."""
+    if force or not os.path.exists(path):
+        return False
+    age_h = (time.time() - os.path.getmtime(path)) / 3600.0
+    if age_h >= max_age_h:
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            json.load(f)
+        return True
+    except Exception:
+        return False
+
+
+def _load_json_file(path: str) -> Any:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_devices_by_type(inventory: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -929,6 +956,26 @@ def build_recommendations(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Meraki backup pipeline — fetches org data and writes JSON artifacts."
+    )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        default=False,
+        help="Ignore cached files and re-fetch all data from the Meraki API.",
+    )
+    parser.add_argument(
+        "--cache-age",
+        type=float,
+        default=12.0,
+        metavar="HOURS",
+        help="Max age in hours for a cached file to be considered fresh (default: 12).",
+    )
+    args = parser.parse_args()
+    force = args.force_refresh
+    max_age_h = args.cache_age
+
     load_env()
     api_key = os.getenv("MERAKI_API_KEY")
     if not api_key:
@@ -938,13 +985,22 @@ def main() -> int:
     out_dir = BACKUPS_DIR
     os.makedirs(out_dir, exist_ok=True)
 
+    if force:
+        print("--force-refresh: ignoring all cached files.")
+
     log_path = os.path.join(out_dir, "backup.log")
     with open(log_path, "w", encoding="utf-8") as log_f:
         log_line(log_f, "INFO", f"Backup started. Output directory: {out_dir}")
+        log_line(log_f, "INFO", f"force_refresh={force}  cache_age_h={max_age_h}")
 
-        orgs = paged_get("/organizations", api_key)
-        write_json(os.path.join(out_dir, "organizations.json"), orgs)
-        log_line(log_f, "INFO", f"Organizations fetched: {len(orgs)}")
+        _orgs_path = os.path.join(out_dir, "organizations.json")
+        if _cache_is_fresh(_orgs_path, max_age_h=max_age_h, force=force):
+            orgs = _load_json_file(_orgs_path)
+            log_line(log_f, "INFO", f"Organizations (cached, {len(orgs)} orgs)")
+        else:
+            orgs = paged_get("/organizations", api_key)
+            write_json(_orgs_path, orgs)
+            log_line(log_f, "INFO", f"Organizations fetched: {len(orgs)}")
 
         for org in orgs:
             org_id = org.get("id")
@@ -961,106 +1017,182 @@ def main() -> int:
                 _nf.write(org_name)
             log_line(log_f, "INFO", f"Org start: {org_name} ({org_id}) → {org_slug}/")
 
-            networks = paged_get(f"/organizations/{org_id}/networks", api_key)
-            write_json(os.path.join(org_dir, "networks.json"), networks)
-            log_line(log_f, "INFO", f"Networks fetched: {len(networks)} for {org_name}")
+            def _pf(filename: str) -> str:
+                return os.path.join(org_dir, filename)
 
-            inventory = paged_get(f"/organizations/{org_id}/inventory/devices", api_key)
-            write_json(os.path.join(org_dir, "inventory_devices.json"), inventory)
-            log_line(log_f, "INFO", f"Inventory devices fetched: {len(inventory)} for {org_name}")
+            def _cached_paged(filename: str, path_suffix: str, label: str) -> list:
+                p = _pf(filename)
+                if _cache_is_fresh(p, max_age_h=max_age_h, force=force):
+                    data = _load_json_file(p)
+                    log_line(log_f, "INFO", f"{label} (cached, {len(data) if isinstance(data,list) else '?'} items)")
+                    return data
+                data = paged_get(path_suffix, api_key)
+                write_json(p, data)
+                log_line(log_f, "INFO", f"{label}: {len(data)} items fetched")
+                return data
 
-            avail = paged_get(f"/organizations/{org_id}/devices/availabilities", api_key)
-            write_json(os.path.join(org_dir, "devices_availabilities.json"), avail)
+            def _cached_safe_paged(filename: str, path_suffix: str, label: str) -> list:
+                p = _pf(filename)
+                if _cache_is_fresh(p, max_age_h=max_age_h, force=force):
+                    data = _load_json_file(p)
+                    log_line(log_f, "INFO", f"{label} (cached)")
+                    return data if isinstance(data, list) else []
+                data, err = safe_paged_get(path_suffix, api_key)
+                write_json(p, data if not err else {"error": err})
+                if err:
+                    log_line(log_f, "WARN", f"{label} failed: {err}")
+                else:
+                    log_line(log_f, "INFO", f"{label}: {len(data)} items fetched")
+                return data if not err else []
+
+            def _cached_safe_get(filename: str, path_suffix: str, label: str, params=None) -> Any:
+                p = _pf(filename)
+                if _cache_is_fresh(p, max_age_h=max_age_h, force=force):
+                    data = _load_json_file(p)
+                    log_line(log_f, "INFO", f"{label} (cached)")
+                    return data, None
+                data, err = safe_get_one(path_suffix, api_key, params=params)
+                write_json(p, data if not err else {"error": err})
+                if err:
+                    log_line(log_f, "WARN", f"{label} failed: {err}")
+                else:
+                    log_line(log_f, "INFO", f"{label} fetched")
+                return data, err
+
+            networks = _cached_paged("networks.json", f"/organizations/{org_id}/networks", "Networks")
+            inventory = _cached_paged("inventory_devices.json", f"/organizations/{org_id}/inventory/devices", "Inventory")
+
+            avail = _cached_safe_paged("devices_availabilities.json", f"/organizations/{org_id}/devices/availabilities", "Availabilities")
             availability_summary = summarize_availabilities(avail)
-            log_line(log_f, "INFO", f"Availabilities fetched: {len(avail)} for {org_name}")
 
             devices_by_type = load_devices_by_type(inventory)
             inventory_summary = summarize_inventory(inventory)
 
             # Licensing overview
-            licensing, err = fetch_licensing_overview(str(org_id), api_key)
-            write_json(os.path.join(org_dir, "licensing.json"), licensing if not err else {"error": err})
-            if err:
-                log_line(log_f, "WARN", f"Licensing failed for {org_name}: {err}")
+            _lic_path = _pf("licensing.json")
+            if _cache_is_fresh(_lic_path, max_age_h=max_age_h, force=force):
+                licensing = _load_json_file(_lic_path)
+                err = licensing.get("error") if isinstance(licensing, dict) else None
+                log_line(log_f, "INFO", f"Licensing (cached) for {org_name}")
             else:
-                log_line(log_f, "INFO", f"Licensing fetched for {org_name}")
+                licensing, err = fetch_licensing_overview(str(org_id), api_key)
+                write_json(_lic_path, licensing if not err else {"error": err})
+                if err:
+                    log_line(log_f, "WARN", f"Licensing failed for {org_name}: {err}")
+                else:
+                    log_line(log_f, "INFO", f"Licensing fetched for {org_name}")
 
-            # Firmware upgrades — surfaces available and scheduled upgrades
-            firmware, err = safe_get_one(f"/organizations/{org_id}/firmware/upgrades", api_key)
-            write_json(os.path.join(org_dir, "firmware_upgrades.json"), firmware if not err else {"error": err})
-            if err:
-                log_line(log_f, "WARN", f"Firmware upgrades failed for {org_name}: {err}")
-            else:
-                log_line(log_f, "INFO", f"Firmware upgrades fetched for {org_name}")
-
-            # MX WAN uplink statuses — internet health per appliance
-            uplink_statuses, err = safe_paged_get(f"/organizations/{org_id}/uplinks/statuses", api_key)
-            write_json(os.path.join(org_dir, "uplink_statuses.json"), uplink_statuses if not err else {"error": err})
-            if err:
-                log_line(log_f, "WARN", f"Uplink statuses failed for {org_name}: {err}")
-            else:
-                log_line(log_f, "INFO", f"Uplink statuses fetched: {len(uplink_statuses)} for {org_name}")
-
-            # Device statuses — richer than availabilities; includes firmware version
-            devices_statuses, err = safe_paged_get(f"/organizations/{org_id}/devices/statuses", api_key)
-            write_json(os.path.join(org_dir, "devices_statuses.json"), devices_statuses if not err else {"error": err})
-            if err:
-                log_line(log_f, "WARN", f"Devices statuses failed for {org_name}: {err}")
-            else:
-                log_line(log_f, "INFO", f"Devices statuses fetched: {len(devices_statuses)} for {org_name}")
+            firmware, _fw_err = _cached_safe_get(
+                "firmware_upgrades.json",
+                f"/organizations/{org_id}/firmware/upgrades",
+                "Firmware upgrades",
+            )
+            uplink_statuses = _cached_safe_paged(
+                "uplink_statuses.json",
+                f"/organizations/{org_id}/uplinks/statuses",
+                "Uplink statuses",
+            )
+            devices_statuses = _cached_safe_paged(
+                "devices_statuses.json",
+                f"/organizations/{org_id}/devices/statuses",
+                "Device statuses",
+            )
 
             # Switch port statuses and configs
-            port_statuses: Dict[str, List[Dict[str, Any]]] = {}
-            port_configs: Dict[str, List[Dict[str, Any]]] = {}
-            lldp_cdp: Dict[str, Any] = {}
+            # Cache at the aggregated file level — if all three are fresh, skip the loop entirely
             switches = devices_by_type.get("switch", [])
-            if switches:
-                log_line(log_f, "INFO", f"Collecting switch port data for {len(switches)} switch(es) in {org_name}")
-            for idx, sw in enumerate(switches, start=1):
-                serial = sw.get("serial")
-                if not serial:
-                    continue
-                if idx == 1 or idx % 10 == 0 or idx == len(switches):
-                    log_line(log_f, "INFO", f"Switch port progress for {org_name}: {idx}/{len(switches)} ({serial})")
-                try:
-                    statuses = paged_get(f"/devices/{serial}/switch/ports/statuses", api_key, params={"timespan": TIMESPAN_24H})
-                    port_statuses[serial] = statuses
-                except Exception as e:
-                    port_statuses[serial] = [{"error": str(e)}]
-                    log_line(log_f, "ERROR", f"Switch port statuses failed for {serial}: {e}")
-                try:
-                    configs = paged_get(f"/devices/{serial}/switch/ports", api_key)
-                    port_configs[serial] = configs
-                except Exception as e:
-                    port_configs[serial] = [{"error": str(e)}]
-                    log_line(log_f, "ERROR", f"Switch port configs failed for {serial}: {e}")
-                try:
-                    lldp, err = safe_get_one(f"/devices/{serial}/lldpCdp", api_key)
-                    lldp_cdp[serial] = lldp if not err else {"error": err}
-                    if err:
-                        log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {err}")
-                except Exception as e:
-                    lldp_cdp[serial] = {"error": str(e)}
-                    log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {e}")
+            _sw_stat_path = _pf("switch_port_statuses.json")
+            _sw_cfg_path  = _pf("switch_port_configs.json")
+            _lldp_path    = _pf("lldp_cdp.json")
+            _sw_cache_fresh = (
+                _cache_is_fresh(_sw_stat_path, max_age_h=max_age_h, force=force)
+                and _cache_is_fresh(_sw_cfg_path,  max_age_h=max_age_h, force=force)
+                and _cache_is_fresh(_lldp_path,    max_age_h=max_age_h, force=force)
+            )
+            if _sw_cache_fresh:
+                port_statuses = _load_json_file(_sw_stat_path)
+                port_configs  = _load_json_file(_sw_cfg_path)
+                lldp_cdp      = _load_json_file(_lldp_path)
+                log_line(log_f, "INFO", f"Switch port data (cached, {len(switches)} switches) for {org_name}")
+            else:
+                port_statuses: Dict[str, List[Dict[str, Any]]] = {}
+                port_configs: Dict[str, List[Dict[str, Any]]] = {}
+                lldp_cdp: Dict[str, Any] = {}
+                if switches:
+                    log_line(log_f, "INFO", f"Collecting switch port data for {len(switches)} switch(es) in {org_name}")
+                for idx, sw in enumerate(switches, start=1):
+                    serial = sw.get("serial")
+                    if not serial:
+                        continue
+                    if idx == 1 or idx % 10 == 0 or idx == len(switches):
+                        log_line(log_f, "INFO", f"Switch port progress for {org_name}: {idx}/{len(switches)} ({serial})")
+                    try:
+                        statuses = paged_get(f"/devices/{serial}/switch/ports/statuses", api_key, params={"timespan": TIMESPAN_24H})
+                        port_statuses[serial] = statuses
+                    except Exception as e:
+                        port_statuses[serial] = [{"error": str(e)}]
+                        log_line(log_f, "ERROR", f"Switch port statuses failed for {serial}: {e}")
+                    try:
+                        configs = paged_get(f"/devices/{serial}/switch/ports", api_key)
+                        port_configs[serial] = configs
+                    except Exception as e:
+                        port_configs[serial] = [{"error": str(e)}]
+                        log_line(log_f, "ERROR", f"Switch port configs failed for {serial}: {e}")
+                    try:
+                        lldp, err = safe_get_one(f"/devices/{serial}/lldpCdp", api_key)
+                        lldp_cdp[serial] = lldp if not err else {"error": err}
+                        if err:
+                            log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {err}")
+                    except Exception as e:
+                        lldp_cdp[serial] = {"error": str(e)}
+                        log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {e}")
 
-            write_json(os.path.join(org_dir, "switch_port_statuses.json"), port_statuses)
-            write_json(os.path.join(org_dir, "switch_port_configs.json"), port_configs)
-            write_json(os.path.join(org_dir, "lldp_cdp.json"), lldp_cdp)
+                write_json(_sw_stat_path, port_statuses)
+                write_json(_sw_cfg_path,  port_configs)
+                write_json(_lldp_path,    lldp_cdp)
 
             # Wireless and client stats per network
-            wireless_connection_stats: Dict[str, Any] = {}
-            wireless_mesh_statuses: Dict[str, Any] = {}
-            clients_overview: Dict[str, Any] = {}
-            wireless_rf_profiles: Dict[str, Any] = {}
-            wireless_settings: Dict[str, Any] = {}
-            wireless_clients: Dict[str, Any] = {}
-            wireless_ssids: Dict[str, Any] = {}
-            alerts_history: Dict[str, Any] = {}
-            appliance_baseline: Dict[str, Any] = {}
-            appliance_uplinks_usage: Dict[str, Any] = {}
-            if networks:
-                log_line(log_f, "INFO", f"Collecting network-level telemetry for {len(networks)} network(s) in {org_name}")
-            for idx, net in enumerate(networks, start=1):
+            # Network-level telemetry — cache entire per-network aggregated files
+            _net_cache_files = [
+                "wireless_connection_stats.json", "wireless_mesh_statuses.json",
+                "clients_overview.json", "wireless_rf_profiles.json",
+                "wireless_settings.json", "wireless_clients.json",
+                "wireless_ssids.json", "alerts_history.json",
+                "appliance_uplinks_usage.json",
+            ]
+            _net_cache_fresh = all(
+                _cache_is_fresh(_pf(fn), max_age_h=max_age_h, force=force)
+                for fn in _net_cache_files
+            )
+            if _net_cache_fresh:
+                wireless_connection_stats = _load_json_file(_pf("wireless_connection_stats.json"))
+                wireless_mesh_statuses    = _load_json_file(_pf("wireless_mesh_statuses.json"))
+                clients_overview          = _load_json_file(_pf("clients_overview.json"))
+                wireless_rf_profiles      = _load_json_file(_pf("wireless_rf_profiles.json"))
+                wireless_settings         = _load_json_file(_pf("wireless_settings.json"))
+                wireless_clients          = _load_json_file(_pf("wireless_clients.json"))
+                wireless_ssids            = _load_json_file(_pf("wireless_ssids.json"))
+                alerts_history            = _load_json_file(_pf("alerts_history.json"))
+                appliance_uplinks_usage   = _load_json_file(_pf("appliance_uplinks_usage.json"))
+                # appliance_baseline is derived; load from security_baseline.json if fresh
+                _sb_path = _pf("security_baseline.json")
+                appliance_baseline: Dict[str, Any] = {}
+                log_line(log_f, "INFO", f"Network-level telemetry (cached, {len(networks)} networks) for {org_name}")
+            else:
+                wireless_connection_stats: Dict[str, Any] = {}
+                wireless_mesh_statuses: Dict[str, Any] = {}
+                clients_overview: Dict[str, Any] = {}
+                wireless_rf_profiles: Dict[str, Any] = {}
+                wireless_settings: Dict[str, Any] = {}
+                wireless_clients: Dict[str, Any] = {}
+                wireless_ssids: Dict[str, Any] = {}
+                alerts_history: Dict[str, Any] = {}
+                appliance_baseline: Dict[str, Any] = {}
+                appliance_uplinks_usage: Dict[str, Any] = {}
+            if not _net_cache_fresh:
+                if networks:
+                    log_line(log_f, "INFO", f"Collecting network-level telemetry for {len(networks)} network(s) in {org_name}")
+            for idx, net in enumerate(networks if not _net_cache_fresh else [], start=1):
                 net_id = net.get("id")
                 if not net_id:
                     continue
@@ -1193,18 +1325,24 @@ def main() -> int:
 
                     appliance_baseline[net_id] = net_baseline
 
-            write_json(os.path.join(org_dir, "wireless_connection_stats.json"), wireless_connection_stats)
-            write_json(os.path.join(org_dir, "wireless_mesh_statuses.json"), wireless_mesh_statuses)
-            write_json(os.path.join(org_dir, "clients_overview.json"), clients_overview)
-            write_json(os.path.join(org_dir, "wireless_rf_profiles.json"), wireless_rf_profiles)
-            write_json(os.path.join(org_dir, "wireless_settings.json"), wireless_settings)
-            write_json(os.path.join(org_dir, "wireless_clients.json"), wireless_clients)
-            write_json(os.path.join(org_dir, "wireless_ssids.json"), wireless_ssids)
-            write_json(os.path.join(org_dir, "alerts_history.json"), alerts_history)
-            write_json(os.path.join(org_dir, "appliance_uplinks_usage.json"), appliance_uplinks_usage)
-            write_json(os.path.join(org_dir, "inventory_summary.json"), inventory_summary)
-            security_baseline = summarize_appliance_security(appliance_baseline, networks)
-            write_json(os.path.join(org_dir, "security_baseline.json"), security_baseline)
+            if not _net_cache_fresh:
+                write_json(_pf("wireless_connection_stats.json"), wireless_connection_stats)
+                write_json(_pf("wireless_mesh_statuses.json"), wireless_mesh_statuses)
+                write_json(_pf("clients_overview.json"), clients_overview)
+                write_json(_pf("wireless_rf_profiles.json"), wireless_rf_profiles)
+                write_json(_pf("wireless_settings.json"), wireless_settings)
+                write_json(_pf("wireless_clients.json"), wireless_clients)
+                write_json(_pf("wireless_ssids.json"), wireless_ssids)
+                write_json(_pf("alerts_history.json"), alerts_history)
+                write_json(_pf("appliance_uplinks_usage.json"), appliance_uplinks_usage)
+            write_json(_pf("inventory_summary.json"), inventory_summary)
+            _sb_path = _pf("security_baseline.json")
+            if not _net_cache_fresh or not _cache_is_fresh(_sb_path, max_age_h=max_age_h, force=force):
+                security_baseline = summarize_appliance_security(appliance_baseline, networks)
+                write_json(_sb_path, security_baseline)
+            else:
+                security_baseline = _load_json_file(_sb_path)
+                log_line(log_f, "INFO", f"Security baseline (cached) for {org_name}")
 
             # Recommendations
             wireless_summary = summarize_wireless_connection_stats(wireless_connection_stats)
@@ -1212,20 +1350,26 @@ def main() -> int:
             ap_client_summary = summarize_ap_clients(wireless_clients)
             switch_findings = recommend_switch_ports(port_statuses, port_configs)
             poe_summary = summarize_poe_power(port_statuses, TIMESPAN_24H)
-            channel_utilization, err = safe_get_one(
-                f"/organizations/{org_id}/wireless/devices/channelUtilization/byDevice",
-                api_key,
-                params={
-                    "networkIds[]": [n.get("id") for n in networks if n.get("id")],
-                    "timespan": 86400,
-                },
-            )
-            if err:
-                log_line(log_f, "WARN", f"Channel utilization failed for org {org_id}: {err}")
+            _ch_path = _pf("channel_utilization_by_device.json")
+            if _cache_is_fresh(_ch_path, max_age_h=max_age_h, force=force):
+                channel_utilization = _load_json_file(_ch_path)
+                err = None
+                log_line(log_f, "INFO", f"Channel utilization (cached) for {org_name}")
+            else:
+                channel_utilization, err = safe_get_one(
+                    f"/organizations/{org_id}/wireless/devices/channelUtilization/byDevice",
+                    api_key,
+                    params={
+                        "networkIds[]": [n.get("id") for n in networks if n.get("id")],
+                        "timespan": 86400,
+                    },
+                )
+                if err:
+                    log_line(log_f, "WARN", f"Channel utilization failed for org {org_id}: {err}")
+                write_json(_ch_path, channel_utilization if not err else {"error": err})
             channel_data = channel_utilization if (not err and isinstance(channel_utilization, list)) else []
             channel_summary = summarize_channel_utilization(channel_data)
-            write_json(os.path.join(org_dir, "channel_utilization_by_device.json"), channel_utilization if not err else {"error": err})
-            write_json(os.path.join(org_dir, "poe_power_summary.json"), poe_summary)
+            write_json(_pf("poe_power_summary.json"), poe_summary)
 
             rec = build_recommendations(
                 org_name,
@@ -1250,6 +1394,14 @@ def main() -> int:
             with open(os.path.join(org_dir, "recommendations.md"), "w", encoding="utf-8") as f:
                 f.write(rec)
 
+            # Write schema meta — consumed by report_generator.py for version compatibility check
+            write_json(os.path.join(org_dir, "backup_meta.json"), {
+                "schema_version": BACKUP_SCHEMA_VERSION,
+                "pipeline_version": PIPELINE_VERSION,
+                "backup_date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "org_name": org_name,
+                "org_id": str(org_id),
+            })
             log_line(log_f, "INFO", f"Org complete: {org_name} ({org_id})")
 
         log_line(log_f, "INFO", "Backup completed successfully.")

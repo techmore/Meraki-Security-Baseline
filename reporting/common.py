@@ -13,6 +13,54 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKUPS_DIR = os.path.join(BASE_DIR, "backups")
 REPORT_VERSION = "1.0"
 
+# Must match BACKUP_SCHEMA_VERSION in meraki_backup.py.
+# Increment here when report_generator.py adds new required fields/files.
+EXPECTED_BACKUP_SCHEMA_VERSION = 1
+
+
+def read_backup_meta(org_dir: str) -> Dict[str, Any]:
+    """Load backup_meta.json if present; return {} if missing (pre-versioning backup)."""
+    path = os.path.join(org_dir, "backup_meta.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def check_backup_schema(org_dir: str) -> List[str]:
+    """Return a list of warning strings if the backup schema is incompatible or unversioned.
+
+    An empty list means the backup is compatible or unknown (pre-versioning).
+    A non-empty list should be surfaced as a banner in the report and logged.
+    """
+    meta = read_backup_meta(org_dir)
+    warnings: List[str] = []
+    if not meta:
+        warnings.append(
+            "backup_meta.json not found — this backup predates schema versioning. "
+            "Re-run meraki_backup.py to generate a versioned backup."
+        )
+        return warnings
+    schema_ver = meta.get("schema_version")
+    if schema_ver is None:
+        warnings.append("backup_meta.json is missing schema_version field.")
+    elif schema_ver < EXPECTED_BACKUP_SCHEMA_VERSION:
+        warnings.append(
+            f"Backup schema version {schema_ver} is older than expected "
+            f"{EXPECTED_BACKUP_SCHEMA_VERSION}. Some report sections may be incomplete. "
+            "Re-run meraki_backup.py to refresh."
+        )
+    elif schema_ver > EXPECTED_BACKUP_SCHEMA_VERSION:
+        warnings.append(
+            f"Backup schema version {schema_ver} is newer than this report generator "
+            f"({EXPECTED_BACKUP_SCHEMA_VERSION}). Update report_generator.py to "
+            "avoid missing new fields."
+        )
+    return warnings
+
 _NON_ORG = {"backup.log", "organizations.json", "master_recommendations.md",
              "recommendations_ai_enhanced.md"}
 
