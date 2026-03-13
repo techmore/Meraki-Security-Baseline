@@ -4,6 +4,108 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+usage() {
+  echo "Usage: ./run.sh [options]"
+  echo ""
+  echo "  -m, --model <model>  Override the Ollama model used for AI review"
+  echo "                       Default: qwen3.5:9b"
+  echo "      --report-only    Skip all data collection; build reports from existing backups/"
+  echo "      --no-query       Skip API query + backup stages; use data already in backups/"
+  echo "      --no-ai-review   Skip the Ollama review stage"
+  echo "      --help           Show this help"
+  echo ""
+  echo "  Examples:"
+  echo "    ./run.sh                           # full run — always fetches fresh data"
+  echo "    ./run.sh --model qwen3.5:27b"
+  echo "    ./run.sh --no-query                # re-generate reports from last backup"
+  echo "    ./run.sh --report-only --no-ai-review"
+}
+
+validate_environment() {
+  local failures=0
+
+  printf "  ${DIM2}│${R}  Checking Python runtime... "
+  if command -v python3 >/dev/null 2>&1; then
+    echo -e "${GRN}ok${R}"
+  else
+    echo -e "${RED}missing${R}"
+    (( failures++ )) || true
+  fi
+
+  printf "  ${DIM2}│${R}  Checking pipeline imports... "
+  if (( REPORT_ONLY == 1 || NO_QUERY == 1 )); then
+    if python3 - <<'PY' >/dev/null 2>&1
+import report_generator
+import merge_recommendations
+PY
+    then
+      echo -e "${GRN}ok${R}"
+    else
+      echo -e "${RED}import failure${R}"
+      (( failures++ )) || true
+    fi
+  else
+    if python3 - <<'PY' >/dev/null 2>&1
+import meraki_backup
+import meraki_query
+import report_generator
+import merge_recommendations
+PY
+    then
+      echo -e "${GRN}ok${R}"
+    else
+      echo -e "${RED}import failure${R}"
+      (( failures++ )) || true
+    fi
+  fi
+
+  printf "  ${DIM2}│${R}  Checking backup directory... "
+  mkdir -p backups && echo -e "${GRN}ok${R}"
+
+  if (( REPORT_ONLY == 1 || NO_QUERY == 1 )); then
+    printf "  ${DIM2}│${R}  Checking existing org backups... "
+    if find backups -mindepth 1 -maxdepth 1 -type d ! -name '.*' | read -r _; then
+      echo -e "${GRN}ok${R}"
+    else
+      echo -e "${RED}no org backups found${R}"
+      (( failures++ )) || true
+    fi
+  else
+    printf "  ${DIM2}│${R}  Checking MERAKI_API_KEY... "
+    if [[ -n "${MERAKI_API_KEY:-}" ]] || ([[ -f .env ]] && rg -q '^MERAKI_API_KEY=' .env); then
+      echo -e "${GRN}ok${R}"
+    else
+      echo -e "${RED}missing${R}"
+      (( failures++ )) || true
+    fi
+  fi
+
+  printf "  ${DIM2}│${R}  Checking Ollama availability... "
+  if (( NO_AI_REVIEW == 1 )); then
+    echo -e "${MGT}skipped${R}"
+  elif command -v ollama >/dev/null 2>&1; then
+    echo -e "${GRN}installed${R}"
+  else
+    echo -e "${YLW}optional${R}"
+  fi
+
+  printf "  ${DIM2}│${R}  Checking PDF fallback tool... "
+  if python3 - <<'PY' >/dev/null 2>&1
+import importlib
+importlib.import_module("weasyprint")
+PY
+  then
+    echo -e "${GRN}weasyprint${R}"
+  elif command -v wkhtmltopdf >/dev/null 2>&1; then
+    echo -e "${GRN}wkhtmltopdf${R}"
+  else
+    echo -e "${RED}no PDF generator${R}"
+    (( failures++ )) || true
+  fi
+
+  return "$failures"
+}
+
 # ── Flag parsing ─────────────────────────────────────────────────────────────
 CUSTOM_MODEL=""
 REPORT_ONLY=0
@@ -28,23 +130,14 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: ./run.sh [options]"
-      echo ""
-      echo "  -m, --model <model>  Override the Ollama model used for AI review"
-      echo "                       Default: qwen3.5:9b"
-      echo "      --report-only    Skip all data collection; build reports from existing backups/"
-      echo "      --no-query       Skip API query + backup stages; use data already in backups/"
-      echo "      --no-ai-review   Skip the Ollama review stage"
-      echo ""
-      echo "  Examples:"
-      echo "    ./run.sh                           # full run — always fetches fresh data"
-      echo "    ./run.sh --model qwen3.5:27b"
-      echo "    ./run.sh --no-query                # re-generate reports from last backup"
-      echo "    ./run.sh --report-only --no-ai-review"
+      usage
       exit 0
       ;;
     *)
-      shift
+      echo "Unknown option: $1" >&2
+      echo "" >&2
+      usage >&2
+      exit 2
       ;;
   esac
 done
@@ -68,7 +161,7 @@ DIM2='\033[38;5;242m'  # dim gray
 
 # ── Stage definitions: "label|script" ───────────────────────────────────────
 STAGES=(
-  "Environment Check|meraki_env.py"
+  "Environment Validation|__internal__validate_environment__"
   "Query Meraki API|meraki_query.py"
   "Backup Data|meraki_backup.py"
   "Merge Recommendations|merge_recommendations.py"
@@ -207,6 +300,26 @@ run_stage() {
   printf "  ${BLU}${BOLD}[%d/%d]${R}  ${BOLD}%s${R}\n" "$step" "$TOTAL" "$label"
   echo -e "  ${DIM2}$(printf '─%.0s' $(seq 1 58))${R}"
 
+  if [[ "$script" == "__internal__validate_environment__" ]]; then
+    local t_start t_end
+    t_start=$(date +%s)
+    if validate_environment; then
+      t_end=$(date +%s)
+      STAGE_DURATION=$(( t_end - t_start ))
+      printf "\n  ${GRN}✓${R}  ${BOLD}%s${R}${DIM2}  completed in %ds${R}\n" \
+        "$label" "$STAGE_DURATION"
+      STAGE_STATUS="ok"
+      return 0
+    else
+      t_end=$(date +%s)
+      STAGE_DURATION=$(( t_end - t_start ))
+      printf "\n  ${RED}✗${R}  ${BOLD}%s${R}${RED}  failed${R}${DIM2}  after %ds${R}\n" \
+        "$label" "$STAGE_DURATION"
+      STAGE_STATUS="fail"
+      return 1
+    fi
+  fi
+
   if [[ ! -f "$script" ]]; then
     printf "  ${MGT}⚡  Script not found: %s — skipping${R}\n" "$script"
     STAGE_STATUS="skip"
@@ -280,7 +393,7 @@ for i in "${!STAGES[@]}"; do
   STAGE_DURATION=0
   PREVIOUS_DURATION=$(read_previous_duration "$label")
 
-  if (( REPORT_ONLY == 1 && i < 3 )); then
+  if (( REPORT_ONLY == 1 && i > 0 && i < 3 )); then
     echo ""
     printf "  ${BLU}${BOLD}[%d/%d]${R}  ${BOLD}%s${R}\n" "$step" "$TOTAL" "$label"
     echo -e "  ${DIM2}$(printf '─%.0s' $(seq 1 58))${R}"
