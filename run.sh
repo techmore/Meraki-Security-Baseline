@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 # ── Flag parsing ─────────────────────────────────────────────────────────────
 CUSTOM_MODEL=""
 REPORT_ONLY=0
+NO_AI_REVIEW=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model|-m)
@@ -17,19 +18,26 @@ while [[ $# -gt 0 ]]; do
       REPORT_ONLY=1
       shift
       ;;
+    --no-ai-review)
+      NO_AI_REVIEW=1
+      shift
+      ;;
     --help|-h)
-      echo "Usage: ./run.sh [--model <ollama-model>] [--report-only]"
+      echo "Usage: ./run.sh [--model <ollama-model>] [--report-only] [--no-ai-review]"
       echo ""
       echo "  -m, --model    Override the Ollama model used for AI review"
       echo "                 Default: qwen3.5:9b"
       echo "      --report-only"
       echo "                 Skip API collection and build from existing backups/"
+      echo "      --no-ai-review"
+      echo "                 Skip the Ollama review stage"
       echo ""
       echo "  Examples:"
       echo "    ./run.sh"
       echo "    ./run.sh --model qwen3.5:27b"
       echo "    ./run.sh -m gemma3:12b"
       echo "    ./run.sh --report-only"
+      echo "    ./run.sh --report-only --no-ai-review"
       exit 0
       ;;
     *)
@@ -65,6 +73,7 @@ STAGES=(
   "Generate Reports|report_generator.py"
 )
 TOTAL=${#STAGES[@]}
+TIMING_HISTORY_FILE="$(pwd)/backups/.stage_timings.json"
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 _hr() {
@@ -88,13 +97,28 @@ print_header() {
 }
 
 _spinner() {
-  # Background spinner — reads from a pipe to know when to stop
+  # Background spinner with live elapsed timing and previous-run comparison
   local msg="$1"
+  local previous_duration="${2:-0}"
   local frames=('⠋' '⠙' '⠸' '⠴' '⠦' '⠇')
   local i=0
-  # shellcheck disable=SC2154
+  local start_ts now elapsed hint previous_display
+  start_ts=$(date +%s)
   while true; do
-    printf "\r  ${YLW}%s${R}  ${DIM2}%s${R}  " "${frames[$i]}" "$msg"
+    now=$(date +%s)
+    elapsed=$(( now - start_ts ))
+    if (( previous_duration > 0 )); then
+      previous_display=$(_fmt_duration "$previous_duration")
+      hint=""
+      if (( elapsed > (previous_duration + (previous_duration / 4)) )); then
+        hint=" ${RED}(longer than usual)${R}"
+      fi
+      printf "\r  ${YLW}%s${R}  ${DIM2}%s${R}  ${DIM2}%s / %s last run${R}%b  " \
+        "${frames[$i]}" "$msg" "$(_fmt_duration "$elapsed")" "$previous_display" "$hint"
+    else
+      printf "\r  ${YLW}%s${R}  ${DIM2}%s${R}  ${DIM2}%s elapsed${R}  " \
+        "${frames[$i]}" "$msg" "$(_fmt_duration "$elapsed")"
+    fi
     i=$(( (i+1) % 6 ))
     sleep 0.08
   done
@@ -104,6 +128,63 @@ _clear_line() {
   printf '\r%80s\r' ''
 }
 
+_fmt_duration() {
+  local total="${1:-0}"
+  local mins secs
+  mins=$(( total / 60 ))
+  secs=$(( total % 60 ))
+  printf "%02d:%02d" "$mins" "$secs"
+}
+
+read_previous_duration() {
+  local stage_label="$1"
+  python3 - "$TIMING_HISTORY_FILE" "$stage_label" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+label = sys.argv[2]
+if not path.exists():
+    print(0)
+    raise SystemExit
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    print(0)
+    raise SystemExit
+print(int((data.get("stages") or {}).get(label, 0) or 0))
+PY
+}
+
+write_timing_history() {
+  local tmp
+  tmp=$(mktemp)
+  python3 - "$TIMING_HISTORY_FILE" "$tmp" "${STAGES[@]}" "${RESULTS[@]}" "${DURATIONS[@]}" <<'PY'
+import json, pathlib, sys
+
+history_path = pathlib.Path(sys.argv[1])
+tmp_path = pathlib.Path(sys.argv[2])
+argv = sys.argv[3:]
+stage_count = len(argv) // 3
+stage_defs = argv[:stage_count]
+results = argv[stage_count:stage_count * 2]
+durations = argv[stage_count * 2:]
+
+stages = {}
+for stage_def, result, duration in zip(stage_defs, results, durations):
+    label = stage_def.split("|", 1)[0]
+    if result == "ok":
+        try:
+            stages[label] = int(duration)
+        except ValueError:
+            pass
+
+payload = {"updatedAt": __import__("datetime").datetime.now().isoformat(), "stages": stages}
+tmp_path.write_text(json.dumps(payload, indent=2))
+history_path.parent.mkdir(parents=True, exist_ok=True)
+tmp_path.replace(history_path)
+PY
+  rm -f "$tmp"
+}
+
 # ── Stage runner ─────────────────────────────────────────────────────────────
 # Returns 0 on success, 1 on failure
 # Globals written: STAGE_STATUS (ok|fail|skip), STAGE_DURATION
@@ -111,6 +192,7 @@ run_stage() {
   local label="$1"
   local script="$2"
   local step="$3"
+  local previous_duration="${4:-0}"
 
   # Stage header
   echo ""
@@ -130,7 +212,7 @@ run_stage() {
   local t_start
   t_start=$(date +%s)
 
-  _spinner "$script" &
+  _spinner "$script" "$previous_duration" &
   local spin_pid=$!
 
   set +e
@@ -182,6 +264,7 @@ for i in "${!STAGES[@]}"; do
 
   STAGE_STATUS="ok"
   STAGE_DURATION=0
+  PREVIOUS_DURATION=$(read_previous_duration "$label")
 
   if (( REPORT_ONLY == 1 && i < 3 )); then
     echo ""
@@ -194,7 +277,18 @@ for i in "${!STAGES[@]}"; do
     continue
   fi
 
-  if run_stage "$label" "$script" "$step"; then
+  if (( NO_AI_REVIEW == 1 && i == 4 )); then
+    echo ""
+    printf "  ${BLU}${BOLD}[%d/%d]${R}  ${BOLD}%s${R}\n" "$step" "$TOTAL" "$label"
+    echo -e "  ${DIM2}$(printf '─%.0s' $(seq 1 58))${R}"
+    printf "  ${MGT}⚡${R}  ${BOLD}%s${R}${DIM2}  skipped by --no-ai-review${R}\n" "$label"
+    RESULTS[$i]="skip"
+    DURATIONS[$i]=0
+    (( SKIP_COUNT++ )) || true
+    continue
+  fi
+
+  if run_stage "$label" "$script" "$step" "$PREVIOUS_DURATION"; then
     RESULTS[$i]="$STAGE_STATUS"
     DURATIONS[$i]=$STAGE_DURATION
   else
@@ -213,6 +307,10 @@ done
 
 SUITE_END=$(date +%s)
 SUITE_DURATION=$(( SUITE_END - SUITE_START ))
+
+if (( FAIL_COUNT == 0 )); then
+  write_timing_history
+fi
 
 # ── Summary table ─────────────────────────────────────────────────────────────
 echo ""
