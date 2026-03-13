@@ -2,7 +2,7 @@
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from .common import (
@@ -368,13 +368,20 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # Licensing
     _lic_mode = licensing_data.get("licenseMode") if isinstance(licensing_data, dict) else None
     _lic_list = licensing_data.get("licenses", []) if isinstance(licensing_data, dict) else []
+    # co-term licenses use an `expired` bool; per-device licenses use a `status` string
     _lic_expired = sum(
         1 for lic in _lic_list
-        if isinstance(lic, dict) and str(lic.get("status", "")).lower() in ("expired", "inactive")
+        if isinstance(lic, dict) and (
+            lic.get("expired") is True
+            or str(lic.get("status", "")).lower() in ("expired", "inactive")
+        )
     )
     _lic_active = sum(
         1 for lic in _lic_list
-        if isinstance(lic, dict) and str(lic.get("status", "")).lower() in ("ok", "active", "in compliance")
+        if isinstance(lic, dict) and not lic.get("invalidated") and (
+            lic.get("expired") is False
+            or str(lic.get("status", "")).lower() in ("ok", "active", "in compliance")
+        )
     )
     if isinstance(licensing_data, dict) and licensing_data.get("error"):
         _lic_rating, _lic_stat, _lic_detail = "info", "Data unavailable", "license API not accessible"
@@ -530,65 +537,193 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # =========================================================
     online_count = device_status_counts.get("online", 0)
     availability_pct = round(100 * online_count / total_devices) if total_devices else 0
+    _offline_count = total_devices - online_count
 
-    # Optional LLM-generated purpose paragraph
-    _purpose_block = ""
-    if exec_purpose:
-        _purpose_block = f"""
-      <div class="summary-card exec-purpose-card">
-        <div class="summary-title">Report Purpose</div>
-        <div class="summary-body">{exec_purpose}</div>
-      </div>"""
+    # Build a prioritized risk list from health card ratings
+    _risk_bullets: list[str] = []
+    _prio_bullets: list[str] = []
+
+    if _avail_rating == "crit":
+        _risk_bullets.append(
+            f"<strong>Device availability is critical</strong> — {_offline_count} of "
+            f"{total_devices} devices offline or alerting ({availability_pct}% online). "
+            "Investigate offline units immediately; cloud management and SD-WAN path "
+            "selection depend on appliance reachability."
+        )
+        _prio_bullets.append(
+            "<strong>Immediate (0–2 weeks):</strong> Triage offline devices, confirm "
+            "connectivity to Meraki Dashboard, and restore any degraded links."
+        )
+    elif _avail_rating == "warn":
+        _risk_bullets.append(
+            f"<strong>Availability is below target</strong> — {_offline_count} device(s) "
+            f"offline, bringing availability to {availability_pct}%. Monitor closely and "
+            "escalate if the count increases."
+        )
+
+    if _rf_rating == "crit":
+        _risk_bullets.append(
+            f"<strong>Wireless RF congestion detected</strong> — {len(high_util_devices)} "
+            "access point(s) exceeding 70% channel utilization. Dense AP deployments or "
+            "insufficient 5 GHz client steering are the most common causes. Congestion at "
+            "this level degrades throughput and roaming quality for all associated clients."
+        )
+        _prio_bullets.append(
+            "<strong>Short-term (2–6 weeks):</strong> Audit high-utilization APs — reduce "
+            "SSID count, enable band steering, rebalance channel plan, or add APs to relieve "
+            "congested cells."
+        )
+    elif _rf_rating == "warn":
+        _risk_bullets.append(
+            f"<strong>Wireless RF utilization is elevated</strong> — {len(high_util_devices)} "
+            "AP(s) above 70% utilization. Proactive channel and SSID tuning is advised "
+            "before utilization climbs further."
+        )
+
+    if _sw_rating in ("crit", "warn"):
+        _risk_bullets.append(
+            f"<strong>Switch port issues require attention</strong> — {len(switch_port_issues)} "
+            "port(s) with errors or sub-gigabit uplinks detected. Frame errors and duplex "
+            "mismatches can introduce latency and packet loss that affects every device "
+            "downstream of the affected port."
+        )
+        _prio_bullets.append(
+            "<strong>Short-term (2–6 weeks):</strong> Resolve switch port errors and duplex "
+            "mismatches; replace cabling or SFPs where hardware faults are confirmed."
+        )
+
+    if _lc_rating in ("crit", "warn") and _eol_models:
+        _eol_str = ", ".join(_eol_models[:4]) + (" …" if len(_eol_models) > 4 else "")
+        _risk_bullets.append(
+            f"<strong>End-of-life hardware in production</strong> — model(s) {_eol_str} are "
+            "past or approaching Cisco Meraki end-of-support. EOL devices no longer receive "
+            "firmware security patches and may lose Dashboard management access when licenses "
+            "lapse. Continued operation increases security exposure and reduces operational "
+            "predictability."
+        )
+        _prio_bullets.append(
+            "<strong>Medium-term (6–12 weeks):</strong> Initiate hardware refresh planning "
+            f"for EOL device(s) — {_eol_str}. Prioritize units in critical path roles "
+            "(core switching, edge appliances)."
+        )
+    elif _lc_rating == "warn" and _model_count > 8:
+        _risk_bullets.append(
+            f"<strong>High hardware fragmentation</strong> — {_model_count} distinct device "
+            "models detected. Fragmented hardware inventories complicate firmware management, "
+            "spare-parts stocking, and consistent feature availability across the environment."
+        )
+
+    if _lic_rating == "crit" and _lic_expired > 0:
+        _risk_bullets.append(
+            f"<strong>Expired license keys present</strong> — {_lic_expired} license key(s) "
+            "have lapsed. Expired co-term licenses can cause devices to enter limited mode, "
+            "losing Dashboard visibility and security feature enforcement. Renew or re-assign "
+            "before the next renewal window."
+        )
+        _prio_bullets.append(
+            "<strong>Immediate (0–2 weeks):</strong> Review expired license keys in the "
+            "Meraki Dashboard and engage your Cisco account team to assess renewal impact."
+        )
+
+    if _sec_rating in ("crit", "warn"):
+        _risk_bullets.append(
+            f"<strong>Security baseline gaps</strong> — {_sec_fail} check(s) failing and "
+            f"{_sec_warn} warning(s). Baseline failures such as disabled AMP, IDS/IPS in "
+            "detection-only mode, or exposed port forwarding represent direct threat exposure "
+            "for the environment."
+        )
+        _prio_bullets.append(
+            "<strong>Short-term (2–6 weeks):</strong> Address failing security baseline "
+            "checks — enable AMP and IDS/IPS in prevention mode; review internet-exposed "
+            "services."
+        )
+
+    # Long-term catch-all
+    _prio_bullets.append(
+        "<strong>Long-term (3–6 months):</strong> Develop a hardware refresh roadmap "
+        "addressing lifecycle gaps, standardize access switching tiers, and validate "
+        "licensing coverage aligns with the physical device inventory."
+    )
+
+    # Overall health rating label
+    _crit_domains = [r for r in [_avail_rating, _rf_rating, _sw_rating, _wan_rating,
+                                  _sec_rating, _lc_rating, _lic_rating] if r == "crit"]
+    _warn_domains = [r for r in [_avail_rating, _rf_rating, _sw_rating, _wan_rating,
+                                  _sec_rating, _lc_rating, _lic_rating] if r == "warn"]
+    if _crit_domains:
+        _overall_label = (
+            f'<span class="hcard-rating hcard-crit">'
+            f'Needs Attention — {len(_crit_domains)} Critical Domain(s)</span>'
+        )
+    elif _warn_domains:
+        _overall_label = (
+            f'<span class="hcard-rating hcard-warn">'
+            f'Monitor — {len(_warn_domains)} Warning(s)</span>'
+        )
     else:
-        _purpose_block = f"""
-      <div class="summary-card exec-purpose-card">
-        <div class="summary-title">Report Purpose</div>
-        <div class="summary-body">
-          This report provides a comprehensive assessment of the <strong>{org_name}</strong>
-          Cisco Meraki network infrastructure. It is intended to give stakeholders and
-          technical teams a clear picture of current network health, traffic patterns,
-          device performance, security posture, and licensing status. Findings are
-          prioritized by operational impact, and each section includes actionable
-          recommendations to guide remediation, capacity planning, and strategic
-          improvements over the next 3&ndash;6 months.
-        </div>
-      </div>"""
+        _overall_label = '<span class="hcard-rating hcard-good">Healthy</span>'
+
+    _risk_html = (
+        "<ul>" + "".join(f"<li>{b}</li>" for b in _risk_bullets) + "</ul>"
+        if _risk_bullets
+        else "<p>No critical or warning-level findings were identified in this scan.</p>"
+    )
+    _prio_html = "<ol>" + "".join(f"<li>{b}</li>" for b in _prio_bullets) + "</ol>"
+
+    # LLM purpose override
+    _purpose_body = (
+        exec_purpose
+        if exec_purpose
+        else (
+            f"This network audit report covers the <strong>{_he(org_name)}</strong> Cisco Meraki "
+            f"environment as of {_report_date}. It is prepared for IT leadership, operations "
+            "teams, and decision makers who need a clear view of current network health, risk "
+            "posture, lifecycle status, and near-term action priorities. Each section provides "
+            "observed findings, interpreted risk, and prioritized recommendations. Where data "
+            "was unavailable at collection time, findings are noted as partial or pending."
+        )
+    )
 
     exec_html = f"""
     <section id="executive-summary" class="report-section exec-full-page">
       <h1>1. Executive Summary</h1>
-      {_purpose_block}
 
-      <h2>Network Function</h2>
+      <div class="summary-card exec-purpose-card">
+        <div class="summary-body">{_purpose_body}</div>
+      </div>
+
+      <h2>Current State Assessment</h2>
       <div class="summary-card">
         <div class="summary-body">
-          The <strong>{org_name}</strong> Cisco Meraki infrastructure provides managed enterprise
-          networking across <strong>{len(devices_by_network)}</strong> site(s). The network delivers
-          secure internet access, segmented LAN connectivity, and wireless coverage for end users
-          and devices. All infrastructure is cloud-managed via the Meraki Dashboard, providing
-          centralized visibility, automated firmware management, and real-time alerting. From an
-          architecture standpoint, the value of this environment depends heavily on orderly upgrade
-          cycles and consistent hardware tiers: edge/security appliances should be refreshed before
-          support windows become a risk, switching should be upgraded in coherent distribution/access
-          phases, and wireless generations should remain reasonably aligned so client experience and
-          RF behavior are predictable across buildings. {_hardware_consistency_note(top_models)}
+          The <strong>{_he(org_name)}</strong> network spans
+          <strong>{len(devices_by_network)}</strong> site(s) with a total of
+          <strong>{total_devices}</strong> cloud-managed Meraki devices:
+          {inv_by_type.get("appliance", 0)} MX security appliance(s),
+          {inv_by_type.get("switch", 0)} MS switch(es), and
+          {inv_by_type.get("wireless", 0)} MR access point(s).
+          At the time of this report, <strong>{online_count}</strong> of {total_devices} devices
+          ({availability_pct}%) were online and reporting to Dashboard.
+          Overall environment health: {_overall_label}
+          <br><br>
+          {_hardware_consistency_note(top_models)}
         </div>
       </div>
 
+      <h2>Top Operational Risks</h2>
       <div class="summary-card">
-        <div class="summary-title">Lifecycle &amp; Upgrade Planning</div>
         <div class="summary-body">
-          Meraki environments age unevenly when older MX, MS, and MR families remain in service
-          beside newer platforms. That creates mismatched uplink speeds, inconsistent PoE behavior,
-          mixed firmware support horizons, and uneven client capabilities. For this reason, upgrade
-          planning should prioritize hardware consistency by role: keep core/distribution switching
-          on the highest-capacity supported models, standardize access switching where possible, and
-          refresh older AP generations in site-based waves so roaming, airtime policy, and client
-          throughput remain predictable.
+          {_risk_html}
         </div>
       </div>
 
-      <h2>Component Descriptions</h2>
+      <h2>Recommended Priorities</h2>
+      <div class="summary-card">
+        <div class="summary-body">
+          {_prio_html}
+        </div>
+      </div>
+
+      <h2>Infrastructure Inventory</h2>
       <table class="data">
         <thead>
           <tr>
@@ -604,24 +739,24 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
             <td>MX Security Appliance</td>
             <td>{inv_by_type.get("appliance", 0)}</td>
             <td>Internet gateway, stateful firewall, site-to-site and client VPN,
-                DHCP/DNS server, content filtering, and SD-WAN path selection.
-                All traffic entering or leaving the site passes through the MX.</td>
+                DHCP/DNS, content filtering, and SD-WAN path selection.
+                All ingress/egress traffic passes through the MX.</td>
           </tr>
           <tr>
             <td><strong>Distribution / Access</strong></td>
             <td>MS Ethernet Switch</td>
             <td>{inv_by_type.get("switch", 0)}</td>
-            <td>Wired LAN switching, VLAN segmentation, 802.1Q trunking between switches,
-                PoE power delivery for access points and IP devices, and port-level
+            <td>Wired LAN switching, VLAN segmentation, 802.1Q trunking,
+                PoE power delivery for APs and IP devices, and port-level
                 access control via ACLs or 802.1X.</td>
           </tr>
           <tr>
             <td><strong>Wireless</strong></td>
             <td>MR Access Point</td>
             <td>{inv_by_type.get("wireless", 0)}</td>
-            <td>802.11 wireless access on 2.4 GHz and 5 GHz bands, automatic RF channel
-                and transmit power management, seamless client roaming, and
-                SSID-to-VLAN mapping for traffic segmentation.</td>
+            <td>802.11 wireless on 2.4 GHz and 5 GHz, automatic RF management,
+                seamless client roaming, and SSID-to-VLAN mapping for
+                traffic segmentation.</td>
           </tr>
         </tbody>
       </table>
@@ -1166,13 +1301,117 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     poe_html += "</section>"
 
     # =========================================================
-    # SECTION 6: SECURITY BASELINE
+    # SECTION 6: SECURITY & COMPLIANCE
     # =========================================================
+    # Build category-level summary from baseline checks
+    _sec_by_cat: dict[str, list] = {}
+    for _chk in security_checks:
+        _cat = _chk.get("check", "Other")
+        _sec_by_cat.setdefault(_cat, []).append(_chk)
+
+    # Per-category pass/fail summary rows
+    _sec_cat_rows = ""
+    for _cat, _items in sorted(_sec_by_cat.items()):
+        _cat_pass = sum(1 for c in _items if c.get("status", "").lower() == "pass")
+        _cat_fail = sum(1 for c in _items if c.get("status", "").lower() == "fail")
+        _cat_warn = sum(1 for c in _items if c.get("status", "").lower() == "warning")
+        if _cat_fail:
+            _cat_cls = "check-fail"
+        elif _cat_warn:
+            _cat_cls = "check-warning"
+        else:
+            _cat_cls = "check-pass"
+        _net_names = ", ".join(sorted({c.get("networkName", "Org") for c in _items}))
+        _detail = _items[0].get("description", "") if len(_items) == 1 else f"{len(_items)} networks evaluated"
+        _sec_cat_rows += (
+            f"<tr>"
+            f"<td><strong>{_he(_cat)}</strong></td>"
+            f'<td class="{_cat_cls}">'
+            f'{"❌ Fail" if _cat_fail else ("⚠ Warning" if _cat_warn else "✔ Pass")}'
+            f"</td>"
+            f"<td>{_cat_pass + _cat_warn + _cat_fail} sites</td>"
+            f"<td>{_he(_detail)}</td>"
+            f"</tr>"
+        )
+
+    # Port forwarding posture summary
+    _pf_checks = [c for c in security_checks if "port forwarding" in c.get("check", "").lower()]
+    _pf_exposed = [c for c in _pf_checks if c.get("status", "").lower() != "pass"]
+    if _pf_exposed:
+        _pf_note = (
+            f"<strong class='text-crit'>{len(_pf_exposed)} site(s) have internet-exposed port "
+            f"forwarding rules that may require review.</strong> Each exposed rule creates a "
+            "direct inbound path from the internet to an internal host. Confirm all forwarding "
+            "rules are intentional, access-controlled, and documented."
+        )
+    elif _pf_checks:
+        _pf_note = (
+            f"No unrestricted internet-exposed port forwarding rules were detected across "
+            f"{len(_pf_checks)} site(s) evaluated. Continue to review forwarding rules "
+            "periodically as application requirements change."
+        )
+    else:
+        _pf_note = (
+            "Port forwarding posture could not be evaluated — appliance baseline data not "
+            "available in this backup set."
+        )
+
+    # Overall security posture framing
+    _sec_summary = security_baseline.get("summary", {}) if isinstance(security_baseline, dict) else {}
+    _sec_total = sum(_sec_summary.values()) if _sec_summary else len(security_checks)
+    if _sec_fail > 0:
+        _sec_posture = (
+            f"<strong class='text-crit'>Action required</strong> — {_sec_fail} check(s) failing "
+            f"out of {_sec_total} evaluated. Failing checks represent active exposure that should "
+            "be addressed before the next maintenance window."
+        )
+    elif _sec_warn > 0:
+        _sec_posture = (
+            f"<strong>Attention advised</strong> — {_sec_warn} check(s) in warning state. "
+            "No critical failures detected, but warning-level gaps should be scheduled for "
+            "remediation to harden posture proactively."
+        )
+    else:
+        _sec_posture = (
+            f"<strong>Posture is satisfactory</strong> — {_sec_pass} check(s) passed with no "
+            "failures or warnings detected. Maintain current configuration discipline and "
+            "review this section after any major firmware or policy change."
+        )
+
     security_html = f"""
     <section id="security-baseline" class="report-section">
-      <h1>7. Security Baseline</h1>
-      <p>This section uses appliance baseline data when available from the backup pipeline.
-         Older backup sets fall back to heuristic checks derived from device and port telemetry.</p>
+      <h1>7. Security &amp; Compliance</h1>
+      <p>This section evaluates security posture from two angles: an appliance-level baseline
+         check (AMP, IDS/IPS, spoof protection, and internet exposure) and a CIS Controls
+         mapping in the following section. Together they form the security health layer of
+         this network audit.</p>
+
+      <div class="summary-card">
+        <div class="summary-title">Security Posture Summary</div>
+        <div class="summary-body">
+          {_sec_posture}
+          <br><br>
+          <strong>Firewall &amp; Internet Exposure:</strong> {_pf_note}
+          <br><br>
+          <em>Note: L3 inbound firewall rule detail requires a separate collection step
+          (<code>GET /networks/&#123;id&#125;/appliance/firewall/inboundFirewallRules</code>).
+          That data is not present in this backup set. Add it to the pipeline to surface
+          specific rule-level exposure in future reports.</em>
+        </div>
+      </div>
+
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Check Category</th>
+            <th>Result</th>
+            <th>Scope</th>
+            <th>Finding</th>
+          </tr>
+        </thead>
+        <tbody>{_sec_cat_rows}</tbody>
+      </table>
+
       {render_security_baseline(security_checks)}
     </section>
     """
@@ -1296,91 +1535,150 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         for payload in org_license_payloads
         if isinstance(payload, dict) and not payload.get("error")
     )
-    current_license_count = (
-        len(licensing_data.get("licenses", []))
-        if isinstance(licensing_data, dict) and isinstance(licensing_data.get("licenses"), list)
-        else 0
+
+    # Build license rows — supports both co-term key lists and per-device status APIs.
+    # co-term: licenses is a list of {key, expired (bool), counts, editions, startedAt, duration}
+    # per-device: licenses is a list of {licenseType/productType, status (str), expirationDate, ...}
+    _lic_rows_html = ""
+    _raw_lic_list = (
+        licensing_data.get("licenses", [])
+        if isinstance(licensing_data, dict)
+        else []
     )
+    for _lic in _raw_lic_list:
+        if not isinstance(_lic, dict):
+            continue
+        # Determine model / product from whichever fields are present
+        _counts = _lic.get("counts") or []  # co-term: [{"count": N, "model": "MR Enterprise"}]
+        _editions = _lic.get("editions") or []  # co-term: [{"edition": "Ent", "productType": "appliance"}]
+        if _counts:
+            _lic_type = ", ".join(
+                f"{c.get('count', '?')}× {c.get('model', '?')}" for c in _counts
+            )
+        else:
+            _lic_type = _lic.get("licenseType") or _lic.get("productType") or "—"
+        # Status — co-term uses expired bool; per-device uses status string
+        _is_expired = (
+            _lic.get("expired") is True
+            or str(_lic.get("status", "")).lower() in ("expired", "inactive")
+        )
+        _is_invalidated = bool(_lic.get("invalidated"))
+        if _is_invalidated:
+            _status_str = "Invalidated"
+            _status_cls = "warning"
+        elif _is_expired:
+            _status_str = "Expired"
+            _status_cls = "fail"
+        else:
+            _status_str = _lic.get("status") or "Active"
+            _status_cls = "pass"
+        # Expiry date — co-term calculates from startedAt + duration (days); per-device has expirationDate
+        _exp_date = _lic.get("expirationDate") or _lic.get("expiration") or "—"
+        if _exp_date == "—" and _lic.get("startedAt") and _lic.get("duration"):
+            try:
+                _started = datetime.fromisoformat(_lic["startedAt"].replace("Z", "+00:00"))
+                _exp_dt = _started + timedelta(days=int(_lic["duration"]))
+                _exp_date = _exp_dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        _key = _he(_lic.get("key") or "—")
+        _lic_rows_html += (
+            f"<tr>"
+            f"<td><code style='font-size:9px'>{_key}</code></td>"
+            f"<td>{_he(_lic_type)}</td>"
+            f'<td><span class="check-{_status_cls}">{_status_str}</span></td>'
+            f"<td>{_he(str(_exp_date))}</td>"
+            f"</tr>"
+        )
+
+    _active_count = sum(
+        1 for _l in _raw_lic_list
+        if isinstance(_l, dict) and not _l.get("invalidated") and (
+            _l.get("expired") is False
+            or str(_l.get("status", "")).lower() in ("ok", "active", "in compliance")
+        )
+    )
+    _expired_count = sum(
+        1 for _l in _raw_lic_list
+        if isinstance(_l, dict) and (
+            _l.get("expired") is True
+            or str(_l.get("status", "")).lower() in ("expired", "inactive")
+        )
+    )
+    _total_lic = len(_raw_lic_list)
+
     if isinstance(licensing_data, dict) and licensing_data.get("error"):
-        licensing_scope_note = "Licensing data unavailable for this organization."
+        _lic_summary_note = (
+            "<strong>Licensing data unavailable</strong> — the API returned an error for this "
+            "organization. Verify that the API key has <em>read</em> access to the licensing "
+            "endpoints and re-run the backup pipeline."
+        )
     elif licensing_mode:
-        licensing_scope_note = (
-            f"Licensing is reported at the organization level for this environment ({licensing_mode} model); "
-            "Meraki does not expose a true per-network license inventory in this dataset."
+        _lic_summary_note = (
+            f"This organization uses the <strong>{_he(licensing_mode)}</strong> licensing model. "
+            f"Licensing is tracked at the organization level — {_total_lic} license key(s) on "
+            f"record: <strong>{_active_count} active</strong>, "
+            f"<strong class='{'text-crit' if _expired_count else ''}'>{_expired_count} expired</strong>. "
+            "Meraki co-term licenses do not map 1:1 to individual devices or networks; Dashboard "
+            "determines overall compliance from the combined pool of active seat counts."
         )
     else:
-        licensing_scope_note = (
-            "Licensing scope could not be determined from the current payload. Treat this section as partial until the collection path is validated."
+        _lic_summary_note = (
+            "Licensing scope could not be determined from the collected payload. "
+            "This section should be treated as partial until the pipeline is validated against "
+            "the <code>/organizations/{id}/licenses/overview</code> endpoint."
         )
-    license_rows_html = ""
-    if isinstance(licensing_data, dict) and licensing_data:
-        for lic_key, lic_val in licensing_data.items():
-            if isinstance(lic_val, dict):
-                status = lic_val.get("status", "Unknown")
-                exp = lic_val.get("expirationDate", lic_val.get("expiration", "—"))
-                seats = lic_val.get("licensedDevices", lic_val.get("seats", "—"))
-                license_rows_html += (
-                    f"<tr><td>{lic_key}</td>"
-                    f'<td><span class="check-{"pass" if str(status).lower() == "ok" else "warning"}">{status}</span></td>'
-                    f"<td>{seats}</td><td>{exp}</td></tr>"
-                )
-            elif isinstance(lic_val, list):
-                for item in lic_val:
-                    if isinstance(item, dict):
-                        lic_type = item.get("licenseType", item.get("productType", lic_key))
-                        status = item.get("status", "Unknown")
-                        exp = item.get("expirationDate", item.get("expiration", "—"))
-                        seats = item.get("licensedDevices", item.get("seatCount", "—"))
-                        license_rows_html += (
-                            f"<tr><td>{lic_type}</td>"
-                            f'<td><span class="check-{"pass" if str(status).lower() in ("ok","active") else "warning"}">{status}</span></td>'
-                            f"<td>{seats}</td><td>{exp}</td></tr>"
-                        )
 
-    if license_rows_html:
-        licensing_table = f"""
-        <table class="data">
+    if _lic_rows_html:
+        _licensing_table = f"""
+        <table class="data dense">
           <thead>
-            <tr><th>License Type</th><th>Status</th><th>Licensed Devices</th><th>Expiration</th></tr>
+            <tr>
+              <th>License Key</th>
+              <th>Coverage (Model / Count)</th>
+              <th>Status</th>
+              <th>Expiration</th>
+            </tr>
           </thead>
-          <tbody>{license_rows_html}</tbody>
+          <tbody>{_lic_rows_html}</tbody>
         </table>"""
     else:
-        licensing_table = """
+        _licensing_table = """
         <div class="summary-card">
           <div class="summary-body">
-            Licensing data was not retrieved in this backup run. Add the
-            <code>GET /administered/licensing/subscription/subscriptions</code> or
-            <code>GET /organizations/{organizationId}/licenses/overview</code> API call
-            to the backup pipeline to populate this section.
+            No license records were found in the collected backup. Ensure the backup pipeline
+            calls <code>GET /organizations/{id}/licenses</code> and stores the result as
+            <code>licensing.json</code>.
           </div>
         </div>"""
 
     licensing_html = f"""
     <section id="licensing" class="report-section">
       <h1>10. Licensing Summary</h1>
-      <p>Cisco Meraki devices require active cloud-managed licenses. Expired or
-         co-termination gaps can result in devices losing Dashboard management and some
-         security features. Review expiration dates and plan renewals at least 90 days
-         in advance.</p>
+      <p>Cisco Meraki devices require active cloud-managed licenses to maintain Dashboard
+         visibility and security feature enforcement. Expired licenses can cause devices to
+         enter limited mode. Review expirations and plan renewals at least 90 days in advance.</p>
       <div class="summary-card">
-        <div class="summary-title">Licensing Scope &amp; Coverage</div>
+        <div class="summary-title">Licensing Status &amp; Scope</div>
         <div class="summary-body">
-          { _he(licensing_scope_note) }
+          {_lic_summary_note}
           <br><br>
-          Coverage across locally available org backups: <strong>{coverage_ok}/{coverage_total}</strong>.
-          Current org license records captured: <strong>{current_license_count}</strong>.
+          Org backup coverage: <strong>{coverage_ok}/{coverage_total}</strong> org(s) with
+          licensing data collected.
         </div>
       </div>
-      {licensing_table}
+      {_licensing_table}
       <div class="summary-card">
         <div class="summary-title">Licensing Best Practices</div>
         <div class="summary-body">
           <ul>
-            <li>Enable co-termination or Enterprise Agreement where possible to simplify renewal cycles</li>
             <li>Set Dashboard expiry alerts at 90, 60, and 30 days before license end</li>
-            <li>Verify device count in Dashboard matches physical inventory to avoid over- or under-licensing</li>
-            <li>Confirm Advanced Security (AMP, IDS/IPS) licenses are applied to all MX appliances</li>
+            <li>Confirm device count in Dashboard matches physical inventory to avoid
+                under-licensing surprises at renewal</li>
+            <li>Ensure Advanced Security (AMP, IDS/IPS) tier licenses are applied to all
+                MX appliances — base licenses do not include threat prevention features</li>
+            <li>Consider co-termination or EA consolidation to reduce renewal complexity
+                across multiple license key expiry dates</li>
           </ul>
         </div>
       </div>

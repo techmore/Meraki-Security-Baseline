@@ -786,6 +786,11 @@ def build_html(doc_title: str, body: str) -> str:
       font-weight: 600;
     }}
 
+    /* Inline text risk coloring */
+    .text-crit {{ color: #dc3545; font-weight: 600; }}
+    .text-warn  {{ color: #d97706; font-weight: 600; }}
+    .text-good  {{ color: #28a745; font-weight: 600; }}
+
     /* =====================================================
        CHARTS
        ===================================================== */
