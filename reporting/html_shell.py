@@ -290,7 +290,7 @@ def build_html(doc_title: str, body: str) -> str:
       border-left: 3px solid var(--olive-400);
       padding-left: 20px;
     }}
-    .building-section h2 {{
+    .building-section h3 {{
       margin-top: 0;
     }}
     .traffic-path {{
@@ -956,25 +956,37 @@ def build_html(doc_title: str, body: str) -> str:
        ===================================================== */
     h1 {{
       font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+      font-size: 26px;
+      margin: 0 0 4px;
+      color: var(--olive-900);
+    }}
+    h2 {{
+      font-family: "Playfair Display", Georgia, "Times New Roman", serif;
       font-size: 22px;
       margin: 24px 0 12px;
       border-bottom: 2px solid var(--olive-300);
       padding-bottom: 8px;
       color: var(--olive-900);
     }}
-    h2 {{
+    h3 {{
       font-family: "Playfair Display", Georgia, "Times New Roman", serif;
       font-size: 15px;
       margin: 18px 0 8px;
       color: var(--olive-800);
     }}
-    h3 {{
+    h4 {{
       font-size: 11px;
       font-weight: 600;
       margin: 14px 0 6px;
       color: var(--muted);
       text-transform: uppercase;
       letter-spacing: 0.08em;
+    }}
+    .empty-state {{
+      color: #a8a29e;
+      font-style: italic;
+      text-align: center;
+      padding: 12px 8px;
     }}
     p {{
       margin: 8px 0;
@@ -1070,7 +1082,7 @@ def build_html(doc_title: str, body: str) -> str:
     .topo-site {{
       margin: 24px 0 36px;
     }}
-    .topo-site h2 {{
+    .topo-site h3 {{
       margin-bottom: 10px;
     }}
     .topo-no-lldp {{

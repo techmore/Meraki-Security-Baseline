@@ -749,13 +749,13 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     exec_html = f"""
     <section id="executive-summary" class="report-section exec-full-page">
-      <h1>1. Executive Summary</h1>
+      <h2>1. Executive Summary</h2>
 
       <div class="summary-card exec-purpose-card">
         <div class="summary-body">{_purpose_body}</div>
       </div>
 
-      <h2>Current State Assessment</h2>
+      <h3>Current State Assessment</h3>
       <div class="summary-card">
         <div class="summary-body">
           The <strong>{_he(org_name)}</strong> network spans
@@ -772,21 +772,21 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </div>
       </div>
 
-      <h2>Top Operational Risks</h2>
+      <h3>Top Operational Risks</h3>
       <div class="summary-card">
         <div class="summary-body">
           {_risk_html}
         </div>
       </div>
 
-      <h2>Recommended Priorities</h2>
+      <h3>Recommended Priorities</h3>
       <div class="summary-card">
         <div class="summary-body">
           {_prio_html}
         </div>
       </div>
 
-      <h2>Infrastructure Inventory</h2>
+      <h3>Infrastructure Inventory</h3>
       <table class="data">
         <thead>
           <tr>
@@ -824,7 +824,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </tbody>
       </table>
 
-      <h2>Health at a Glance</h2>
+      <h3>Health at a Glance</h3>
       {health_grid_html}
       {render_kpi_row(kpi_items)}
     </section>
@@ -872,7 +872,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     network_overview_html = f"""
     <section id="network-overview" class="report-section">
-      <h1>2. Network Overview</h1>
+      <h2>2. Network Overview</h2>
       <p>Each row represents one managed network (site / building), listed in the functional
          order of the traffic path: WAN edge (MX) &rarr; switching layer (MS) &rarr;
          wireless layer (MR) &rarr; end clients.</p>
@@ -888,10 +888,10 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           </tr>
         </thead>
         <tbody>
-          {"".join(network_overview_rows)}
+          {"".join(network_overview_rows) if network_overview_rows else '<tr><td colspan="6" class="empty-state">No devices found in this organization\'s backup. Run a full backup to populate this section.</td></tr>'}
         </tbody>
       </table>
-      <h2>Model Inventory &amp; Capabilities</h2>
+      <h3>Model Inventory &amp; Capabilities</h3>
       <table class="data">
         <thead>
           <tr>
@@ -899,7 +899,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           </tr>
         </thead>
         <tbody>
-          {"".join(f"<tr><td>{_he(model)}</td><td>{count}</td><td>{_he(_model_capability_summary(model))}</td></tr>" for model, count in top_models[:12])}
+          {"".join(f"<tr><td>{_he(model)}</td><td>{count}</td><td>{_he(_model_capability_summary(model))}</td></tr>" for model, count in top_models[:12]) if top_models else '<tr><td colspan="3" class="empty-state">No model inventory data available.</td></tr>'}
         </tbody>
       </table>
       <div class="summary-card">
@@ -988,7 +988,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
             )
         topo_site_parts.append(
             f'<div class="topo-site">'
-            f'<h2>{_he(net_data["name"])}</h2>'
+            f'<h3>{_he(net_data["name"])}</h3>'
             f'{lldp_banner}'
             f'{topo_body}'
             f'</div>'
@@ -1017,7 +1017,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     topology_html = f"""
     <section id="network-topology" class="report-section">
-      <h1>3. Network Topology</h1>
+      <h2>3. Network Topology</h2>
       <p>Hierarchical diagrams for each managed site showing upstream and downstream packet
          flow from the internet edge through MX security appliances into the switching
          fabric. The diagram renders appliances and switches as the primary tree, while
@@ -1059,7 +1059,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         aps        = [d for d in nd if d.get("productType") == "wireless"]
 
         sec = f'<div class="building-section">'
-        sec += f"<h2>{net_name}</h2>"
+        sec += f"<h3>{net_name}</h3>"
 
         # ── Path summary bar ───────────────────────────────────────────────
         _path_parts = []
@@ -1100,7 +1100,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
         # ── MX / WAN edge ─────────────────────────────────────────────────
         if appliances:
-            sec += "<h3>WAN / Edge</h3>"
+            sec += "<h4>WAN / Edge</h4>"
             for _mx in appliances:
                 _serial  = _mx.get("serial", "")
                 _name    = _mx.get("name") or _mx.get("model") or _serial
@@ -1161,7 +1161,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
         # ── Per-switch + grouped AP analysis ──────────────────────────────
         if switches:
-            sec += "<h3>Switches &amp; Connected APs</h3>"
+            sec += "<h4>Switches &amp; Connected APs</h4>"
 
             # Sort switches: ones with issues first, then by name
             def _sw_sort_key(sw):
@@ -1317,7 +1317,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         # ── APs not mapped to a switch (no LLDP entry) ────────────────────
         _unmapped_aps = [a for a in aps if a.get("serial") not in ap_to_switch]
         if _unmapped_aps:
-            sec += "<h3>Access Points (no switch LLDP mapping)</h3>"
+            sec += "<h4>Access Points (no switch LLDP mapping)</h4>"
             sec += (
                 '<table class="data dense">'
                 "<thead><tr>"
@@ -1388,11 +1388,11 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     traffic_html = f"""
     <section id="traffic-flows" class="report-section">
-      <h1>4. Traffic Flows &amp; Bottleneck Analysis</h1>
+      <h2>4. Traffic Flows &amp; Bottleneck Analysis</h2>
       <p>Each site shows the traffic path from WAN edge (MX) through switching and wireless
          layers to end clients. Switches include their connected APs with RF utilization and
          connection failure signals. Bottlenecks are called out at each layer.</p>
-      {"".join(traffic_sections_html)}
+      {"".join(traffic_sections_html) if traffic_sections_html else '<div class="summary-card"><div class="summary-body">No device or uplink data was available for this organization at the time of backup. Run a full backup to populate this section.</div></div>'}
     </section>
     """
 
@@ -1400,8 +1400,8 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # SECTION 4: DEVICE HEALTH & ISSUES
     # =========================================================
     issues_html = """
-    <section id="issues" class="report-section">
-      <h1>5. Device Health &amp; Issues</h1>
+    <section id="device-health" class="report-section">
+      <h2>5. Device Health &amp; Issues</h2>
     """
 
     if device_status_counts:
@@ -1412,7 +1412,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     if switch_port_issues:
         issues_html += """
-        <h2>Switch Port Issues</h2>
+        <h3>Switch Port Issues</h3>
         <table class="data">
           <thead>
             <tr>
@@ -1439,7 +1439,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     if config_issues:
         issues_html += """
-        <h2>Configuration Issues</h2>
+        <h3>Configuration Issues</h3>
         <table class="data">
           <thead>
             <tr><th>Switch Serial</th><th>Port</th><th>Issue</th><th>Type</th></tr>
@@ -1459,7 +1459,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     if high_util_devices:
         issues_html += """
-        <h2>High Utilization Access Points (&gt;70%)</h2>
+        <h3>High Utilization Access Points (&gt;70%)</h3>
         <table class="data">
           <thead>
             <tr>
@@ -1495,7 +1495,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # =========================================================
     poe_html = """
     <section id="poe-analysis" class="report-section">
-      <h1>6. PoE Power Analysis</h1>
+      <h2>6. PoE Power Analysis</h2>
     """
     if poe_switches:
         poe_html += render_section(
@@ -1609,7 +1609,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     security_html = f"""
     <section id="security-baseline" class="report-section">
-      <h1>7. Security &amp; Compliance</h1>
+      <h2>7. Security &amp; Compliance</h2>
       <p>This section evaluates security posture from two angles: an appliance-level baseline
          check (AMP, IDS/IPS, spoof protection, and internet exposure) and a CIS Controls
          mapping in the following section. Together they form the security health layer of
@@ -1651,9 +1651,9 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     rec_html = md_to_html(rec_md)
     recommendations_html = f"""
     <section id="recommendations" class="report-section">
-      <h1>8. Recommendations &amp; Implementation Plan</h1>
+      <h2>8. Recommendations &amp; Implementation Plan</h2>
       {rec_html}
-      <h2>Prioritized Action Timeline</h2>
+      <h3>Prioritized Action Timeline</h3>
       <div class="summary-card">
         <div class="summary-body">
           <ol>
@@ -1731,7 +1731,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     )
     cis8_html = f"""
     <section id="cis8" class="report-section">
-      <h1>9. CIS 8 Controls Assessment</h1>
+      <h2>9. CIS 8 Controls Assessment</h2>
       <p>The following table maps observable Meraki network data to relevant CIS Controls v8
          sub-controls. Items marked <em>Info</em> require data from systems outside the Meraki
          platform to fully evaluate.</p>
@@ -1871,19 +1871,33 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
           </thead>
           <tbody>{_lic_rows_html}</tbody>
         </table>"""
+    elif licensing_data is not None:
+        # File was collected but the licenses array is empty (e.g. org uses a
+        # different licensing mode or has no keys assigned yet)
+        _licensing_table = """
+        <div class="summary-card">
+          <div class="summary-body">
+            No license keys were returned by the Meraki API for this organization.
+            If this organization uses <strong>per-device licensing</strong>, verify that
+            <code>GET /organizations/{id}/licenses</code> is returning data and that the
+            backup pipeline is storing it correctly. If the org is managed under an
+            Enterprise Agreement or co-term umbrella, licensing may be tracked at the
+            parent organization level.
+          </div>
+        </div>"""
     else:
         _licensing_table = """
         <div class="summary-card">
           <div class="summary-body">
-            No license records were found in the collected backup. Ensure the backup pipeline
-            calls <code>GET /organizations/{id}/licenses</code> and stores the result as
-            <code>licensing.json</code>.
+            No <code>licensing.json</code> was found in this backup. Ensure the backup
+            pipeline calls <code>GET /organizations/{id}/licenses</code> and stores the
+            result before generating reports.
           </div>
         </div>"""
 
     licensing_html = f"""
     <section id="licensing" class="report-section">
-      <h1>10. Licensing Summary</h1>
+      <h2>10. Licensing Summary</h2>
       <p>Cisco Meraki devices require active cloud-managed licenses to maintain Dashboard
          visibility and security feature enforcement. Expired licenses can cause devices to
          enter limited mode. Review expirations and plan renewals at least 90 days in advance.</p>
@@ -1963,25 +1977,25 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     if wireless_clients:
         client_tables = f"""
-        <h2>Clients by SSID</h2>
+        <h3>Clients by SSID</h3>
         <table class="data">
           <thead><tr><th>SSID</th><th>Client Count</th></tr></thead>
           <tbody>{_top_rows(ssid_counts)}</tbody>
         </table>
 
-        <h2>Clients by OS / Device Type</h2>
+        <h3>Clients by OS / Device Type</h3>
         <table class="data">
           <thead><tr><th>OS / Device Type</th><th>Client Count</th></tr></thead>
           <tbody>{_top_rows(os_counts)}</tbody>
         </table>
 
-        <h2>Clients by VLAN</h2>
+        <h3>Clients by VLAN</h3>
         <table class="data">
           <thead><tr><th>VLAN</th><th>Client Count</th></tr></thead>
           <tbody>{_top_rows(vlan_counts)}</tbody>
         </table>
 
-        <h2>Signal Strength Distribution</h2>
+        <h3>Signal Strength Distribution</h3>
         <table class="data">
           <thead><tr><th>RSSI Range</th><th>Client Count</th></tr></thead>
           <tbody>{rssi_rows}</tbody>
@@ -1995,7 +2009,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     client_analysis_html = f"""
     <section id="client-analysis" class="report-section">
-      <h1>13. Client Analysis</h1>
+      <h2>13. Client Analysis</h2>
       <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
          in this backup. Wired client detail requires switch port client data which is not
          collected in the current pipeline.</p>
@@ -2122,7 +2136,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
     unifi_html = f"""
     <section id="unifi-comparison" class="report-section">
-      <h1>14. UniFi Comparison &amp; Refresh Planning</h1>
+      <h2>15. UniFi Comparison &amp; Refresh Planning</h2>
       <p>This section provides a heuristic cost comparison between the current Meraki
          environment and a notional UniFi replacement. It is a planning estimate only — not
          a procurement quote or a recommendation to replace. Prices are approximate 2025–2026
@@ -2146,7 +2160,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
 
       {_unifi_hw_table}
 
-      <h2>Licensing &amp; Support Model Comparison</h2>
+      <h3>Licensing &amp; Support Model Comparison</h3>
       <table class="data">
         <thead>
           <tr><th>Factor</th><th>Cisco Meraki</th><th>Ubiquiti UniFi</th></tr>
@@ -2203,7 +2217,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </tbody>
       </table>
 
-      <h2>Recommendation</h2>
+      <h3>Recommendation</h3>
       <div class="summary-card">
         <div class="summary-body">
           {"<strong>EOL hardware refresh is the most pressing decision.</strong> The " + str(len(_eol_models)) + " EOL model(s) identified (" + ", ".join(_eol_models[:4]) + ") represent the highest-risk devices. Whether they are refreshed with new Meraki hardware or replaced with an alternative platform, they should exit production within the next 12–18 months." if _eol_models else "<strong>No EOL hardware was flagged.</strong> The refresh decision is less time-pressured."}

@@ -128,7 +128,7 @@ def _build_switch_detail_section(
         return (
             """
     <section id="switch-deep-dive" class="report-section">
-      <h1>14. Switch Deep Dive</h1>
+      <h2>14. Switch Deep Dive</h2>
       <div class="summary-card"><div class="summary-body">No switch inventory was available for detailed port-level analysis.</div></div>
     </section>
     """,
@@ -148,7 +148,7 @@ def _build_switch_detail_section(
     section_parts = [
         """
     <section id="switch-deep-dive" class="report-section">
-      <h1>14. Switch Deep Dive</h1>
+      <h2>14. Switch Deep Dive</h2>
       <p>Port-level views for each MS switch, including link status, negotiated speed, traffic, PoE draw, inferred connected device, and upstream/downstream placement in the switching tree.</p>
     </section>
     """
@@ -260,7 +260,7 @@ def _build_switch_detail_section(
         section_parts.append(
             f"""
     <section id="{_switch_anchor(serial, switch_name)}" class="report-section switch-detail-page">
-      <h1>{_he(switch_name)}</h1>
+      <h3>{_he(switch_name)}</h3>
       <p class="switch-detail-kicker">{_he(site_name)} &mdash; {_he(model or 'MS switch')} &mdash; <code>{_he(serial)}</code></p>
       <div class="switch-detail-stats">
         <div class="switch-detail-stat"><span class="label">Above</span><span class="value">{_he(parent_name if not parent else f'{parent_name} ({parent[1]} -> {parent[2] or "?"})')}</span></div>
@@ -313,7 +313,7 @@ def _build_ap_interference_section(
     if not isinstance(channel_util, list):
         return """
     <section id="ap-interference" class="report-section">
-      <h1>11. AP Interference Audit</h1>
+      <h2>12. AP Interference Audit</h2>
       <div class="summary-card"><div class="summary-body">No AP channel utilization data was available for interference analysis.</div></div>
     </section>
     """
@@ -436,7 +436,7 @@ def _build_ap_interference_section(
     if not per_ap_rows:
         return """
     <section id="ap-interference" class="report-section">
-      <h1>11. AP Interference Audit</h1>
+      <h2>12. AP Interference Audit</h2>
       <div class="summary-card"><div class="summary-body">APs were present, but no usable per-band channel utilization telemetry was available.</div></div>
     </section>
     """
@@ -511,7 +511,7 @@ def _build_ap_interference_section(
         ap_deep_dive_parts.append(
             f"""
       <div class="building-section">
-        <h3>{_he(switch_serial)}</h3>
+        <h4>{_he(switch_serial)}</h4>
         <table class="data dense">
           <thead>
             <tr><th>Port</th><th>AP</th><th>Severity</th><th>Band</th><th>Non-WiFi</th><th>Total</th><th>Assoc</th><th>AP Findings</th></tr>
@@ -562,10 +562,10 @@ def _build_ap_interference_section(
 
     return f"""
     <section id="ap-interference" class="report-section">
-      <h1>12. AP Interference Audit</h1>
+      <h2>12. AP Interference Audit</h2>
       <p>This section converts Meraki channel-utilization telemetry into an RF interference view by site and by AP. `non-Wi-Fi` represents likely external RF noise, while `Wi-Fi` represents airtime consumed by neighboring WLAN activity and co-channel contention. Where exact AP neighbor telemetry is unavailable, neighbor pressure is inferred from high Wi-Fi airtime on the affected band.</p>
       {''.join(site_cards)}
-      <h2>Priority AP Findings</h2>
+      <h3>Priority AP Findings</h3>
       <table class="data dense">
         <thead>
           <tr>
@@ -579,9 +579,9 @@ def _build_ap_interference_section(
         <div class="summary-title">RF Recommendations</div>
         <div class="summary-body"><ul>{''.join(f'<li>{_he(item)}</li>' for item in recommendations)}</ul></div>
       </div>
-      <h2>AP Deep Dive By Switch</h2>
+      <h3>AP Deep Dive By Switch</h3>
       {''.join(ap_deep_dive_parts) if ap_deep_dive_parts else '<div class="summary-card"><div class="summary-body">AP-to-switch mapping was not available in the current telemetry, so AP deep dives could not yet be grouped by switch.</div></div>'}
-      <h2>Diagnostic Dump</h2>
+      <h3>Diagnostic Dump</h3>
       <table class="data dense">
         <thead>
           <tr><th>Site</th><th>AP</th><th>Serial</th><th>Avg Non-WiFi</th><th>Avg Total</th><th>Assoc</th><th>Auth</th><th>Success</th></tr>
@@ -601,7 +601,7 @@ def _build_wan_capacity_section(
     if not isinstance(uplink_statuses, list) or not uplink_statuses:
         return """
     <section id="wan-capacity" class="report-section">
-      <h1>11. Internet Capacity &amp; Utilization</h1>
+      <h2>11. Internet Capacity &amp; Utilization</h2>
       <div class="summary-card"><div class="summary-body">No WAN uplink telemetry was available in this backup.</div></div>
     </section>
     """
@@ -715,7 +715,7 @@ def _build_wan_capacity_section(
 
     return f"""
     <section id="wan-capacity" class="report-section">
-      <h1>11. Internet Capacity &amp; Utilization</h1>
+      <h2>11. Internet Capacity &amp; Utilization</h2>
       <p>This section summarizes current MX WAN uplink state and the maximum internet capacity exposed by the current backup. When Meraki uplink usage history is available, the report also estimates sustained load, observed peak load, and how frequently the circuit approaches its own observed peak during the sampled period.</p>
       <div class="summary-card">
         <div class="summary-title">WAN Snapshot</div>
