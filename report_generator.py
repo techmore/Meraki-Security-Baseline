@@ -864,6 +864,55 @@ def _port_role_short(role: str) -> str:
     return mapping.get(role, role[:3].upper())
 
 
+def _describe_vlan_mode(port_config: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(port_config, dict):
+        return "—"
+    if str(port_config.get("type") or "").lower() == "trunk":
+        native = port_config.get("vlan")
+        allowed = port_config.get("allowedVlans") or "all"
+        if native:
+            return f"Trunk (native {native}; allowed {allowed})"
+        return f"Trunk ({allowed})"
+    access_vlan = port_config.get("vlan")
+    voice_vlan = port_config.get("voiceVlan")
+    if access_vlan or voice_vlan:
+        text = f"Access {access_vlan or '—'}"
+        if voice_vlan:
+            text += f" / Voice {voice_vlan}"
+        return text
+    if port_config.get("name"):
+        return str(port_config.get("name"))
+    return "—"
+
+
+def _build_switch_link_narrative(
+    serial: str,
+    parent: Optional[Tuple[str, str, str]],
+    child_names: List[str],
+    uplink_ports: List[Dict[str, Any]],
+    edge_count: int,
+    serial_to_dev: Dict[str, Dict[str, Any]],
+) -> str:
+    parts = []
+    if parent:
+        parent_name = serial_to_dev.get(parent[0], {}).get("name") or parent[0]
+        parts.append(f"Upstream via port {parent[1]} to {parent_name} on remote port {parent[2] or '?'}")
+    elif uplink_ports:
+        parts.append(
+            "Uplink-marked ports: " + ", ".join(str(port.get("portId")) for port in uplink_ports)
+        )
+    else:
+        parts.append("No confirmed upstream switch link was discovered")
+    if child_names:
+        preview = ", ".join(child_names[:4])
+        if len(child_names) > 4:
+            preview += f", and {len(child_names) - 4} more"
+        parts.append(f"Downstream switches: {preview}")
+    if edge_count:
+        parts.append(f"{edge_count} edge device link(s) inferred from LLDP/CDP")
+    return ". ".join(parts) + "."
+
+
 def _render_switch_port_grid(
     ports: List[Dict[str, Any]],
     port_configs: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -1019,6 +1068,14 @@ def _build_switch_detail_section(
         poe_watts = float(poe_data.get("avgWatts", 0) or 0)
         active_ports = sum(1 for port in ports if str(port.get("status") or "").lower() == "connected")
         uplink_ports = [port for port in ports if port.get("isUplink")]
+        link_narrative = _build_switch_link_narrative(
+            serial,
+            parent,
+            child_names,
+            uplink_ports,
+            edge_counts.get(serial, 0),
+            serial_to_dev,
+        )
         table_rows = []
         for port in ports:
             port_id = str(port.get("portId") or "")
@@ -1046,20 +1103,14 @@ def _build_switch_detail_section(
             if speed.startswith("100 ") or speed.startswith("10 "):
                 indicators.append(f'<span class="badge badge-warn">{_he(speed)}</span>')
             role = _port_role_label(port, port_config, serial_to_dev)
-            vlan_text = "—"
+            vlan_text = _describe_vlan_mode(port_config)
+            port_name = "—"
             if isinstance(port_config, dict):
-                if str(port_config.get("type") or "").lower() == "trunk":
-                    allowed = port_config.get("allowedVlans") or "all"
-                    vlan_text = f"Trunk ({allowed})"
-                elif port_config.get("vlan") or port_config.get("voiceVlan"):
-                    vlan_text = f"Access {port_config.get('vlan') or '—'}"
-                    if port_config.get("voiceVlan"):
-                        vlan_text += f" / Voice {port_config.get('voiceVlan')}"
-                elif port_config.get("name"):
-                    vlan_text = str(port_config.get("name"))
+                port_name = str(port_config.get("name") or "—")
             table_rows.append(
                 "<tr>"
                 f"<td>{_he(port_id or '—')}</td>"
+                f"<td>{_he(port_name)}</td>"
                 f"<td>{_he(role)}</td>"
                 f"<td>{_he(str(port.get('status') or 'Unknown'))}</td>"
                 f"<td>{_he(speed)}</td>"
@@ -1088,6 +1139,7 @@ def _build_switch_detail_section(
         <div class="switch-detail-stat"><span class="label">Port Issues</span><span class="value">{issue_count}</span></div>
       </div>
       <div class="switch-detail-card">
+        <div class="summary-body switch-detail-narrative">{_he(link_narrative)}</div>
         <div class="summary-title">Port Map</div>
         {_render_switch_port_grid(ports, port_configs, serial_to_dev)}
         <div class="switch-detail-legend">
@@ -1102,11 +1154,11 @@ def _build_switch_detail_section(
       <table class="data switch-detail-table">
         <thead>
           <tr>
-            <th>Port</th><th>Role</th><th>Status</th><th>Speed</th><th>Duplex</th><th>VLAN / Mode</th>
+            <th>Port</th><th>Port Label</th><th>Role</th><th>Status</th><th>Speed</th><th>Duplex</th><th>VLAN / Mode</th>
             <th>Total Data</th><th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
           </tr>
         </thead>
-        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"11\">No switch port status data available.</td></tr>'}</tbody>
+        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"12\">No switch port status data available.</td></tr>'}</tbody>
       </table>
     </section>
     """
@@ -2721,6 +2773,10 @@ def build_html(doc_title: str, body: str) -> str:
       border-radius: 12px;
       padding: 16px 18px;
       margin: 16px 0 18px;
+    }}
+    .switch-detail-narrative {{
+      margin-bottom: 10px;
+      color: var(--ink);
     }}
     .switch-port-grid {{
       display: grid;
