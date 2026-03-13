@@ -489,8 +489,15 @@ def _topo_pages(
         )}]
 
     # ── Large site — overview + per-branch detail ────────────────────────────
-    tier2 = [s for s, d in s2d.items()
-             if depth.get(s) == 2 and d.get("productType") == "switch"]
+    # A true branch root is any switch whose confirmed parent is NOT another
+    # switch in this site — covers:
+    #   • roots with no LLDP parent at all
+    #   • switches whose upstream LLDP resolves to the MX serial
+    #   • switches whose upstream LLDP resolves to the MX via CDP name/MAC
+    #     (e.g. "Firewall-6c:7f:0c" — the MX isn't in sw_serials either way)
+    # This is more reliable than depth==2, which gets polluted by fallback values.
+    sw_serials = {s for s, d in s2d.items() if d.get("productType") == "switch"}
+    tier2 = [s for s in sw_serials if parent_of.get(s) not in sw_serials]
 
     pages: List[Dict[str, str]] = []
 
@@ -516,6 +523,8 @@ def _topo_pages(
         q: deque = deque([t2])
         while q:
             node = q.popleft()
+            if node in subtree:
+                continue
             subtree.add(node)
             for c in children.get(node, []):
                 q.append(c)
