@@ -834,6 +834,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     # SECTION 2: NETWORK OVERVIEW (functional ordering)
     # =========================================================
     network_overview_rows = []
+    network_hardware_rows = []
     for net_id, net_data in sorted(
         devices_by_network.items(), key=lambda x: x[1]["name"]
     ):
@@ -870,6 +871,31 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
             f"</tr>"
         )
 
+        def _model_rollup(devs: list, max_items: int = 4) -> str:
+            counts: Dict[str, int] = {}
+            for dev in devs:
+                model = dev.get("model") or "Unknown"
+                counts[model] = counts.get(model, 0) + 1
+            if not counts:
+                return "—"
+            items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+            shown = items[:max_items]
+            remainder = len(items) - len(shown)
+            text = ", ".join(f"{m} ({c})" for m, c in shown)
+            if remainder > 0:
+                text += f" +{remainder} more"
+            return text
+
+        network_hardware_rows.append(
+            f"<tr>"
+            f"<td><strong>{net_data['name']}</strong></td>"
+            f"<td>{_he(_model_rollup(appliances))}</td>"
+            f"<td>{_he(_model_rollup(switches))}</td>"
+            f"<td>{_he(_model_rollup(aps))}</td>"
+            f"<td>{_he(_model_rollup([d for d in nd if d.get('productType') not in ('appliance','switch','wireless')]))}</td>"
+            f"</tr>"
+        )
+
     network_overview_html = f"""
     <section id="network-overview" class="report-section">
       <h2>2. Network Overview</h2>
@@ -889,6 +915,21 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </thead>
         <tbody>
           {"".join(network_overview_rows) if network_overview_rows else '<tr><td colspan="6" class="empty-state">No devices found in this organization\'s backup. Run a full backup to populate this section.</td></tr>'}
+        </tbody>
+      </table>
+      <h3>Hardware Inventory by Site</h3>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Site / Building</th>
+            <th>MX Models</th>
+            <th>MS Models</th>
+            <th>MR Models</th>
+            <th>Other</th>
+          </tr>
+        </thead>
+        <tbody>
+          {"".join(network_hardware_rows) if network_hardware_rows else '<tr><td colspan="5" class="empty-state">No hardware inventory data available for site-level breakdown.</td></tr>'}
         </tbody>
       </table>
       <h3>Model Inventory &amp; Capabilities</h3>
