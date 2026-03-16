@@ -94,6 +94,12 @@ def build_org_report(
     clients_overview_raw = load_json(os.path.join(org_dir, "clients_overview.json")) or {}
     licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
     rf_profiles = load_json(os.path.join(org_dir, "wireless_rf_profiles.json")) or {}
+    inventory_devices = load_json(os.path.join(org_dir, "inventory_devices.json")) or []
+    firmware_upgrades = load_json(os.path.join(org_dir, "firmware_upgrades.json")) or []
+    wireless_settings = load_json(os.path.join(org_dir, "wireless_settings.json")) or {}
+    wireless_ssids = load_json(os.path.join(org_dir, "wireless_ssids.json")) or {}
+    alerts_history = load_json(os.path.join(org_dir, "alerts_history.json")) or {}
+    wireless_mesh_statuses = load_json(os.path.join(org_dir, "wireless_mesh_statuses.json")) or {}
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -119,6 +125,37 @@ def build_org_report(
     networks = load_json(os.path.join(org_dir, "networks.json")) or []
     security_baseline = load_json(os.path.join(org_dir, "security_baseline.json")) or {}
     org_dirs = find_org_dirs(BACKUPS_DIR)
+    network_names = {
+        n.get("id"): n.get("name", n.get("id", ""))
+        for n in networks
+        if isinstance(n, dict) and n.get("id")
+    }
+
+    def _parse_dt(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    eox_devices = []
+    if isinstance(inventory_devices, list):
+        for dev in inventory_devices:
+            if not isinstance(dev, dict):
+                continue
+            eox = dev.get("eox") or {}
+            status = (eox.get("status") or "").lower()
+            if status and status != "active":
+                eox_devices.append({
+                    "name": dev.get("name") or dev.get("model") or dev.get("serial", ""),
+                    "model": dev.get("model", ""),
+                    "serial": dev.get("serial", ""),
+                    "network": network_names.get(dev.get("networkId"), "Unassigned"),
+                    "status": eox.get("status"),
+                    "endOfSale": eox.get("endOfSaleAt"),
+                    "endOfSupport": eox.get("endOfSupportAt"),
+                })
 
     # Device availability analysis
     device_status_counts: Dict[str, int] = {}
@@ -1592,6 +1629,175 @@ def build_org_report(
                 f"</tr>"
             )
         issues_html += "</tbody></table>"
+
+    # Wireless configuration snapshot (settings + SSIDs + mesh)
+    if wireless_settings or wireless_ssids or wireless_mesh_statuses:
+        issues_html += "<h3>Wireless Configuration Snapshot</h3>"
+
+        if isinstance(wireless_settings, dict) and wireless_settings:
+            issues_html += """
+            <table class="data">
+              <thead>
+                <tr>
+                  <th>Network</th><th>Meshing</th><th>Upgrade Strategy</th>
+                  <th>Multicast→Unicast</th><th>Location Analytics</th><th>Reg Domain</th>
+                </tr>
+              </thead>
+              <tbody>
+            """
+            for net_id, settings in wireless_settings.items():
+                if not isinstance(settings, dict):
+                    continue
+                reg = settings.get("regulatoryDomain") or {}
+                issues_html += (
+                    "<tr>"
+                    f"<td>{_he(network_names.get(net_id, net_id))}</td>"
+                    f"<td>{'On' if settings.get('meshingEnabled') else 'Off'}</td>"
+                    f"<td>{_he(str(settings.get('upgradeStrategy') or '—'))}</td>"
+                    f"<td>{'On' if (settings.get('multicastToUnicastConversion') or {}).get('enabled') else 'Off'}</td>"
+                    f"<td>{'On' if settings.get('locationAnalyticsEnabled') else 'Off'}</td>"
+                    f"<td>{_he(reg.get('countryCode') or reg.get('name') or '—')}</td>"
+                    "</tr>"
+                )
+            issues_html += "</tbody></table>"
+
+        if isinstance(wireless_ssids, dict) and wireless_ssids:
+            issues_html += """
+            <div class="summary-card">
+              <div class="summary-title">SSID Configuration (redacted)</div>
+              <div class="summary-body">
+                The report shows SSID configuration status but does not expose passphrases.
+              </div>
+            </div>
+            """
+            for net_id, ssids in wireless_ssids.items():
+                if not isinstance(ssids, list):
+                    continue
+                issues_html += f"<h4>{_he(network_names.get(net_id, net_id))}</h4>"
+                issues_html += """
+                <table class="data">
+                  <thead>
+                    <tr>
+                      <th>SSID</th><th>Enabled</th><th>Auth</th><th>Encryption</th>
+                      <th>Band</th><th>Min Bitrate</th><th>Visible</th><th>VLAN</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                """
+                for ssid in ssids[:20]:
+                    if not isinstance(ssid, dict):
+                        continue
+                    ssid_label = ssid.get("name") or f"SSID {ssid.get('number', '')}"
+                    issues_html += (
+                        "<tr>"
+                        f"<td>{_he(ssid_label)}</td>"
+                        f"<td>{'Yes' if ssid.get('enabled') else 'No'}</td>"
+                        f"<td>{_he(ssid.get('authMode') or '—')}</td>"
+                        f"<td>{_he(ssid.get('wpaEncryptionMode') or ssid.get('encryptionMode') or '—')}</td>"
+                        f"<td>{_he(ssid.get('bandSelection') or '—')}</td>"
+                        f"<td>{_he(str(ssid.get('minBitrate') or '—'))}</td>"
+                        f"<td>{'Yes' if ssid.get('visible', True) else 'No'}</td>"
+                        f"<td>{'Yes' if ssid.get('useVlanTagging') else 'No'}</td>"
+                        "</tr>"
+                    )
+                issues_html += "</tbody></table>"
+
+        if isinstance(wireless_mesh_statuses, dict) and wireless_mesh_statuses:
+            mesh_notes = []
+            for net_id, payload in wireless_mesh_statuses.items():
+                if isinstance(payload, dict) and payload.get("error"):
+                    mesh_notes.append(f"{network_names.get(net_id, net_id)}: {payload.get('error')}")
+            if mesh_notes:
+                issues_html += (
+                    '<div class="summary-card">'
+                    '<div class="summary-title">Mesh Status Notes</div>'
+                    '<div class="summary-body">'
+                    + "<br>".join(_he(n) for n in mesh_notes[:6])
+                    + "</div></div>"
+                )
+
+    # Firmware upgrade history summary
+    if isinstance(firmware_upgrades, list) and firmware_upgrades:
+        fw_rows = []
+        fw_items = []
+        for item in firmware_upgrades:
+            if not isinstance(item, dict):
+                continue
+            dt = _parse_dt(item.get("time", ""))
+            if not dt and item.get("completedAt"):
+                try:
+                    dt = datetime.strptime(item["completedAt"], "%Y-%m-%d %H:%M:%S UTC")
+                except ValueError:
+                    dt = None
+            fw_items.append((dt, item))
+        fw_items.sort(key=lambda x: x[0] or datetime.min, reverse=True)
+        for dt, item in fw_items[:12]:
+            net = (item.get("network") or {}).get("name") or (item.get("network") or {}).get("id", "—")
+            to_ver = (item.get("toVersion") or {}).get("shortName") or (item.get("toVersion") or {}).get("firmware", "—")
+            from_ver = (item.get("fromVersion") or {}).get("shortName") or (item.get("fromVersion") or {}).get("firmware", "—")
+            fw_rows.append([
+                net,
+                str(item.get("productTypes") or "—"),
+                str(item.get("status") or "—"),
+                from_ver,
+                to_ver,
+                dt.strftime("%Y-%m-%d") if dt else "—",
+            ])
+        issues_html += render_section(
+            "Recent Firmware Upgrades (last 12)",
+            [["Network", "Product", "Status", "From", "To", "Date"]] + fw_rows if fw_rows else [],
+        )
+
+    if eox_devices:
+        issues_html += render_section(
+            "End-of-Life / End-of-Support Inventory",
+            [["Device", "Model", "Network", "Status", "End of Sale", "End of Support"]]
+            + [[
+                d.get("name", "—"),
+                d.get("model", "—"),
+                d.get("network", "—"),
+                d.get("status", "—"),
+                d.get("endOfSale", "—"),
+                d.get("endOfSupport", "—"),
+            ] for d in eox_devices[:20]],
+        )
+
+    # Alerts summary
+    if isinstance(alerts_history, dict) and alerts_history:
+        from collections import Counter
+        alert_items = []
+        for net_id, alerts in alerts_history.items():
+            if not isinstance(alerts, list):
+                continue
+            for alert in alerts:
+                if not isinstance(alert, dict):
+                    continue
+                dt = _parse_dt(alert.get("occurredAt", ""))
+                alert_items.append({
+                    "dt": dt,
+                    "type": alert.get("alertType") or alert.get("alertTypeId") or "Alert",
+                    "device": (alert.get("device") or {}).get("name") or (alert.get("device") or {}).get("serial") or "—",
+                    "network": network_names.get(net_id, net_id),
+                })
+        alert_items.sort(key=lambda x: x["dt"] or datetime.min, reverse=True)
+        recent = [a for a in alert_items if a["dt"] and a["dt"] >= datetime.now(tz=a["dt"].tzinfo) - timedelta(days=30)]
+        counts = Counter([a["type"] for a in recent])
+        if counts:
+            issues_html += render_section(
+                "Alerts (last 30 days)",
+                [["Alert Type", "Count"]] + [[t, str(c)] for t, c in counts.most_common(8)],
+            )
+        if alert_items:
+            issues_html += render_section(
+                "Most Recent Alerts",
+                [["Date", "Network", "Device", "Alert"]]
+                + [[
+                    a["dt"].strftime("%Y-%m-%d %H:%M") if a["dt"] else "—",
+                    a["network"],
+                    a["device"],
+                    a["type"],
+                ] for a in alert_items[:10]],
+            )
 
     if not switch_port_issues and not config_issues and not high_util_devices:
         issues_html += (
