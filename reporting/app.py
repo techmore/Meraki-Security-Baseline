@@ -31,7 +31,12 @@ from .html_shell import build_html, write_pdf
 log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str:
+def build_org_report(
+    org_dir: str,
+    org_name: str,
+    exec_purpose: str = "",
+    report_kind: str = "full",
+) -> str:
     # ── Schema compatibility check ────────────────────────────────────────────
     _schema_warnings = check_backup_schema(org_dir)
     _schema_banner = ""
@@ -586,6 +591,72 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         </li>
         <li>
           <span class="toc-num">14</span>
+          <span class="toc-entry">Switch Deep Dive</span>
+          <ol class="toc-sub">
+            {toc_switch_subitems}
+          </ol>
+        </li>
+      </ol>
+    </section>
+    """
+
+    toc_backup_html = f"""
+    <section class="toc-page">
+      <div class="toc-header">Table of Contents</div>
+      <ol class="toc-list">
+        <li>
+          <span class="toc-num">1</span>
+          <span class="toc-entry">Network Overview</span>
+        </li>
+        <li>
+          <span class="toc-num">2</span>
+          <span class="toc-entry">Network Topology</span>
+          <ol class="toc-sub">
+            {toc_site_items}
+          </ol>
+        </li>
+        <li>
+          <span class="toc-num">3</span>
+          <span class="toc-entry">Traffic Flows &amp; Bottleneck Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">4</span>
+          <span class="toc-entry">Device Health &amp; Issues</span>
+        </li>
+        <li>
+          <span class="toc-num">5</span>
+          <span class="toc-entry">PoE Power Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">6</span>
+          <span class="toc-entry">Security Baseline</span>
+        </li>
+        <li>
+          <span class="toc-num">7</span>
+          <span class="toc-entry">Recommendations &amp; Implementation Plan</span>
+        </li>
+        <li>
+          <span class="toc-num">8</span>
+          <span class="toc-entry">CIS 8 Controls Assessment</span>
+        </li>
+        <li>
+          <span class="toc-num">9</span>
+          <span class="toc-entry">Licensing Summary</span>
+        </li>
+        <li>
+          <span class="toc-num">10</span>
+          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
+        </li>
+        <li>
+          <span class="toc-num">11</span>
+          <span class="toc-entry">AP Interference Audit</span>
+        </li>
+        <li>
+          <span class="toc-num">12</span>
+          <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">13</span>
           <span class="toc-entry">Switch Deep Dive</span>
           <ol class="toc-sub">
             {toc_switch_subitems}
@@ -2276,7 +2347,7 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
     </section>
     """
 
-    return (
+    full_body = (
         cover_html
         + _schema_banner
         + toc_html
@@ -2296,6 +2367,32 @@ def build_org_report(org_dir: str, org_name: str, exec_purpose: str = "") -> str
         + switch_deep_dive_html
         + unifi_html
     )
+    exec_body = cover_html + _schema_banner + exec_html
+    backup_body = (
+        cover_html
+        + _schema_banner
+        + toc_backup_html
+        + network_overview_html
+        + topology_html
+        + traffic_html
+        + issues_html
+        + poe_html
+        + security_html
+        + recommendations_html
+        + cis8_html
+        + licensing_html
+        + wan_capacity_html
+        + ap_interference_html
+        + client_analysis_html
+        + switch_deep_dive_html
+        + unifi_html
+    )
+
+    if report_kind == "exec":
+        return exec_body
+    if report_kind == "backup":
+        return backup_body
+    return full_body
 
 def main() -> int:
     org_dirs = find_org_dirs(BACKUPS_DIR)
@@ -2349,6 +2446,42 @@ def main() -> int:
         else:
             log.info("HTML → %s  (no PDF tool found)", html_path)
         generated += 1
+
+        # Executive summary split report
+        exec_body = build_org_report(org_dir, org_name, report_kind="exec")
+        exec_html = build_html(f"{org_name} — Executive Summary", exec_body)
+        exec_html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_exec_summary_report.html")
+        exec_pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_exec_summary_report.pdf")
+        exec_html_alias = os.path.join(org_dir, "report_exec_summary.html")
+        exec_pdf_alias  = os.path.join(org_dir, "report_exec_summary.pdf")
+        with open(exec_html_path, "w", encoding="utf-8") as f:
+            f.write(exec_html)
+        with open(exec_html_alias, "w", encoding="utf-8") as f:
+            f.write(exec_html)
+        if write_pdf(exec_html_path, exec_pdf_path):
+            import shutil
+            shutil.copy2(exec_pdf_path, exec_pdf_alias)
+            log.info("Exec Summary PDF → %s", exec_pdf_path)
+        else:
+            log.info("Exec Summary HTML → %s  (no PDF tool found)", exec_html_path)
+
+        # Backup settings split report
+        backup_body = build_org_report(org_dir, org_name, report_kind="backup")
+        backup_html = build_html(f"{org_name} — Backup Settings Report", backup_body)
+        backup_html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_backup_settings_report.html")
+        backup_pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_backup_settings_report.pdf")
+        backup_html_alias = os.path.join(org_dir, "report_backup_settings.html")
+        backup_pdf_alias  = os.path.join(org_dir, "report_backup_settings.pdf")
+        with open(backup_html_path, "w", encoding="utf-8") as f:
+            f.write(backup_html)
+        with open(backup_html_alias, "w", encoding="utf-8") as f:
+            f.write(backup_html)
+        if write_pdf(backup_html_path, backup_pdf_path):
+            import shutil
+            shutil.copy2(backup_pdf_path, backup_pdf_alias)
+            log.info("Backup Settings PDF → %s", backup_pdf_path)
+        else:
+            log.info("Backup Settings HTML → %s  (no PDF tool found)", backup_html_path)
 
     log.info("Done — %d report(s) generated.", generated)
     return 0

@@ -77,6 +77,18 @@ class TestBuildOrgReport:
         """Topology section should still exist even with empty LLDP fixture."""
         assert "topology" in report_html
 
+    def test_exec_summary_report_variant(self):
+        from reporting.app import build_org_report
+        html = build_org_report(FIXTURES, "Test Org", report_kind="exec")
+        assert "Executive Summary" in html
+        assert "Network Overview" not in html
+
+    def test_backup_settings_report_variant(self):
+        from reporting.app import build_org_report
+        html = build_org_report(FIXTURES, "Test Org", report_kind="backup")
+        assert "Network Overview" in html
+        assert "Executive Summary" not in html
+
 
 class TestHealthCardRatings:
     """Unit test the health domain scoring logic independently."""
