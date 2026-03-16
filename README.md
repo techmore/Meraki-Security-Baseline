@@ -37,6 +37,12 @@ All output is written to `backups/<org>/` (gitignored):
 - `backups/master_recommendations.md` — combined across all orgs
 - `backups/recommendations_ai_enhanced.md` — LLM-reviewed version
 
+## Optional Pricing Input
+
+To enable the Hardware Cost & Refresh Plan section, create a `pricing.json` at the repo root
+or within a specific org backup directory. See `pricing.json.example` for the expected shape.
+Set `unit_cost` and optional `replacement_cycle_years` per model.
+
 ## Requirements
 
 Install dependencies:
