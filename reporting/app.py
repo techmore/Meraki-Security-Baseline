@@ -140,12 +140,17 @@ def build_org_report(
             return None
 
     eox_devices = []
+    lifecycle_by_network: Dict[str, Dict[str, int]] = {}
     if isinstance(inventory_devices, list):
         for dev in inventory_devices:
             if not isinstance(dev, dict):
                 continue
             eox = dev.get("eox") or {}
             status = (eox.get("status") or "").lower()
+            net_name = network_names.get(dev.get("networkId"), "Unassigned")
+            if status:
+                lifecycle_by_network.setdefault(net_name, {})
+                lifecycle_by_network[net_name][status] = lifecycle_by_network[net_name].get(status, 0) + 1
             if status and status != "active":
                 eox_devices.append({
                     "name": dev.get("name") or dev.get("model") or dev.get("serial", ""),
@@ -1004,6 +1009,27 @@ def build_org_report(
             f"</tr>"
         )
 
+    lifecycle_rows = []
+    mixed_lifecycle_nets = []
+    for net_name, counts in sorted(lifecycle_by_network.items(), key=lambda x: x[0]):
+        active = counts.get("active", 0)
+        near = sum(v for k, v in counts.items() if "nearendofsupport" in k)
+        eos = sum(v for k, v in counts.items() if "endofsupport" in k)
+        eosale = sum(v for k, v in counts.items() if "endofsale" in k)
+        mixed = "Yes" if active > 0 and (near + eos + eosale) > 0 else "No"
+        if mixed == "Yes":
+            mixed_lifecycle_nets.append(net_name)
+        lifecycle_rows.append(
+            f"<tr>"
+            f"<td><strong>{_he(net_name)}</strong></td>"
+            f"<td>{active}</td>"
+            f"<td>{near}</td>"
+            f"<td>{eosale}</td>"
+            f"<td>{eos}</td>"
+            f"<td>{mixed}</td>"
+            f"</tr>"
+        )
+
     network_overview_html = f"""
     <section id="network-overview" class="report-section">
       <h2>2. Network Overview</h2>
@@ -1038,6 +1064,22 @@ def build_org_report(
         </thead>
         <tbody>
           {"".join(network_hardware_rows) if network_hardware_rows else '<tr><td colspan="5" class="empty-state">No hardware inventory data available for site-level breakdown.</td></tr>'}
+        </tbody>
+      </table>
+      <h3>Lifecycle Mix by Site (EOX Signals)</h3>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Site / Building</th>
+            <th>Active</th>
+            <th>Near End of Support</th>
+            <th>End of Sale</th>
+            <th>End of Support</th>
+            <th>Mixed Generations</th>
+          </tr>
+        </thead>
+        <tbody>
+          {"".join(lifecycle_rows) if lifecycle_rows else '<tr><td colspan="6" class="empty-state">No EOX lifecycle data available in this backup.</td></tr>'}
         </tbody>
       </table>
       <h3>Model Inventory &amp; Capabilities</h3>
@@ -1963,14 +2005,61 @@ def build_org_report(
     </section>
     """
 
+    # Profile optimization notes (first RF profile per network)
+    rf_profile_notes = []
+    if isinstance(rf_profiles, dict):
+        for net_id, profiles in rf_profiles.items():
+            if not isinstance(profiles, list) or not profiles:
+                continue
+            prof = profiles[0] if isinstance(profiles[0], dict) else None
+            if not prof:
+                continue
+            notes = []
+            ap_band = prof.get("apBandSettings") or {}
+            if ap_band.get("bandSteeringEnabled") is False:
+                notes.append("band steering disabled")
+            min_24 = (prof.get("twoFourGhzSettings") or {}).get("minBitrate")
+            if isinstance(min_24, (int, float)) and min_24 <= 11:
+                notes.append("2.4 GHz min bitrate ≤ 11 Mbps")
+            min_5 = (prof.get("fiveGhzSettings") or {}).get("minBitrate")
+            if isinstance(min_5, (int, float)) and min_5 <= 12:
+                notes.append("5 GHz min bitrate ≤ 12 Mbps")
+            width_5 = (prof.get("fiveGhzSettings") or {}).get("channelWidth")
+            if str(width_5).strip() in ("20", "20MHz"):
+                notes.append("5 GHz channel width fixed at 20 MHz")
+            if notes:
+                rf_profile_notes.append(f"{network_names.get(net_id, net_id)}: " + "; ".join(notes))
+
     # =========================================================
     # SECTION 7: RECOMMENDATIONS & IMPLEMENTATION PLAN
     # =========================================================
     rec_html = md_to_html(rec_md)
+    extra_recs_html = ""
+    if mixed_lifecycle_nets or rf_profile_notes:
+        extra_recs_html = (
+            "<h3>Hardware Mix &amp; AP Profile Optimization</h3>"
+            "<div class=\"summary-card\"><div class=\"summary-body\">"
+        )
+        if mixed_lifecycle_nets:
+            extra_recs_html += (
+                "<strong>Mixed hardware generations detected:</strong> "
+                + _he(", ".join(sorted(mixed_lifecycle_nets)[:8]))
+                + ". Align refresh cycles so upstream switching and downstream APs are on compatible lifecycle tiers."
+                "<br><br>"
+            )
+        if rf_profile_notes:
+            extra_recs_html += (
+                "<strong>AP profile optimization opportunities:</strong><br>"
+                + "<br>".join(_he(n) for n in rf_profile_notes[:10])
+                + "<br>Consider raising minimum bitrates, enabling band steering, and widening 5 GHz channels where density allows."
+            )
+        extra_recs_html += "</div></div>"
+
     recommendations_html = f"""
     <section id="recommendations" class="report-section">
       <h2>8. Recommendations &amp; Implementation Plan</h2>
       {rec_html}
+      {extra_recs_html}
       <h3>Prioritized Action Timeline</h3>
       <div class="summary-card">
         <div class="summary-body">
