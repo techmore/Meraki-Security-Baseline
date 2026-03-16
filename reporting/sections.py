@@ -1,4 +1,5 @@
 import math
+import os
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +21,7 @@ from .common import (
     _speed_label,
     _switch_anchor,
     _build_switch_link_narrative,
+    render_section,
 )
 from .topology import _build_topology_facts
 
@@ -128,7 +130,7 @@ def _build_switch_detail_section(
         return (
             """
     <section id="switch-deep-dive" class="report-section">
-      <h2>14. Switch Deep Dive</h2>
+      <h2>16. Switch Deep Dive</h2>
       <div class="summary-card"><div class="summary-body">No switch inventory was available for detailed port-level analysis.</div></div>
     </section>
     """,
@@ -148,7 +150,7 @@ def _build_switch_detail_section(
     section_parts = [
         """
     <section id="switch-deep-dive" class="report-section">
-      <h2>14. Switch Deep Dive</h2>
+      <h2>16. Switch Deep Dive</h2>
       <p>Port-level views for each MS switch, including link status, negotiated speed, traffic, PoE draw, inferred connected device, and upstream/downstream placement in the switching tree.</p>
     </section>
     """
@@ -313,7 +315,7 @@ def _build_ap_interference_section(
     if not isinstance(channel_util, list):
         return """
     <section id="ap-interference" class="report-section">
-      <h2>12. AP Interference Audit</h2>
+      <h2>14. AP Interference Audit</h2>
       <div class="summary-card"><div class="summary-body">No AP channel utilization data was available for interference analysis.</div></div>
     </section>
     """
@@ -436,7 +438,7 @@ def _build_ap_interference_section(
     if not per_ap_rows:
         return """
     <section id="ap-interference" class="report-section">
-      <h2>12. AP Interference Audit</h2>
+      <h2>14. AP Interference Audit</h2>
       <div class="summary-card"><div class="summary-body">APs were present, but no usable per-band channel utilization telemetry was available.</div></div>
     </section>
     """
@@ -562,7 +564,7 @@ def _build_ap_interference_section(
 
     return f"""
     <section id="ap-interference" class="report-section">
-      <h2>12. AP Interference Audit</h2>
+      <h2>14. AP Interference Audit</h2>
       <p>This section converts Meraki channel-utilization telemetry into an RF interference view by site and by AP. `non-Wi-Fi` represents likely external RF noise, while `Wi-Fi` represents airtime consumed by neighboring WLAN activity and co-channel contention. Where exact AP neighbor telemetry is unavailable, neighbor pressure is inferred from high Wi-Fi airtime on the affected band.</p>
       {''.join(site_cards)}
       <h3>Priority AP Findings</h3>
@@ -601,8 +603,127 @@ def _build_wan_capacity_section(
     if not isinstance(uplink_statuses, list) or not uplink_statuses:
         return """
     <section id="wan-capacity" class="report-section">
-      <h2>11. Internet Capacity &amp; Utilization</h2>
+      <h2>13. Internet Capacity &amp; Utilization</h2>
       <div class="summary-card"><div class="summary-body">No WAN uplink telemetry was available in this backup.</div></div>
+    </section>
+    """
+
+
+def _build_config_coverage_section(
+    org_dir: str,
+    networks: List[Dict[str, Any]],
+) -> str:
+    org_checks = [
+        ("Switch Port Configs", "switch_port_configs.json"),
+        ("Switch Port Statuses", "switch_port_statuses.json"),
+        ("LLDP/CDP Neighbors", "lldp_cdp.json"),
+        ("Wireless Settings", "wireless_settings.json"),
+        ("Wireless SSIDs", "wireless_ssids.json"),
+        ("Wireless RF Profiles", "wireless_rf_profiles.json"),
+        ("Appliance Uplink Usage", "appliance_uplinks_usage.json"),
+        ("Security Baseline Summary", "security_baseline.json"),
+        ("Licensing", "licensing.json"),
+        ("Firmware Upgrades", "firmware_upgrades.json"),
+    ]
+    org_rows = []
+    for label, filename in org_checks:
+        status = "Present" if os.path.exists(os.path.join(org_dir, filename)) else "Missing"
+        org_rows.append([label, status])
+
+    network_rows = []
+    for net in sorted(networks, key=lambda item: item.get("name") or ""):
+        net_id = net.get("id")
+        if not net_id:
+            continue
+        net_name = net.get("name") or net_id
+        base = os.path.join(org_dir, "networks", net_id)
+        def _has(name: str) -> str:
+            return "Present" if os.path.exists(os.path.join(base, name)) else "Missing"
+        network_rows.append(
+            [
+                net_name,
+                _has("appliance_firewall_settings.json"),
+                _has("appliance_port_forwarding_rules.json"),
+                _has("appliance_intrusion.json"),
+                _has("appliance_malware.json"),
+            ]
+        )
+
+    return f"""
+    <section id="config-coverage" class="report-section">
+      <h2>11. Configuration Backup Coverage</h2>
+      <p>This section documents which configuration artifacts are present in the current backup set. Missing items indicate API collection gaps or inaccessible product scopes that should be added before final audit sign-off.</p>
+      {render_section("Org-Wide Configuration Artifacts", [["Artifact", "Status"]] + org_rows if org_rows else [])}
+      {render_section("Per-Network Appliance Configuration", [["Network", "Firewall Settings", "Port Forwarding", "IDS/IPS", "AMP/Malware"]] + network_rows if network_rows else [])}
+    </section>
+    """
+
+
+def _build_budget_forecast_section(
+    inventory_summary: Dict[str, Any],
+    pricing_payload: Dict[str, Any],
+) -> str:
+    by_model = inventory_summary.get("by_model") or {}
+    if not by_model:
+        return """
+    <section id="budget-forecast" class="report-section">
+      <h2>12. Hardware Cost &amp; Refresh Plan</h2>
+      <div class="summary-card"><div class="summary-body">No model inventory data was available to build a refresh budget.</div></div>
+    </section>
+    """
+
+    price_map = pricing_payload.get("models") if isinstance(pricing_payload, dict) else None
+    if not isinstance(price_map, dict):
+        price_map = {}
+
+    rows = []
+    missing = []
+    total_cost = 0.0
+    annual_reserve = 0.0
+    for model, count in sorted(by_model.items(), key=lambda item: (-item[1], item[0])):
+        price = price_map.get(model, {}).get("unit_cost")
+        cycle = price_map.get(model, {}).get("replacement_cycle_years")
+        if price is None:
+            missing.append(model)
+            rows.append([model, str(count), "Missing", "—", "—", "—"])
+            continue
+        try:
+            price = float(price)
+        except (ValueError, TypeError):
+            missing.append(model)
+            rows.append([model, str(count), "Invalid", "—", "—", "—"])
+            continue
+        ext = price * int(count)
+        cycle_years = int(cycle) if isinstance(cycle, (int, float, str)) and str(cycle).isdigit() else 8
+        annual = ext / cycle_years if cycle_years else ext / 8
+        total_cost += ext
+        annual_reserve += annual
+        rows.append([model, str(count), f"${price:,.0f}", f"${ext:,.0f}", str(cycle_years), f"${annual:,.0f}"])
+
+    missing_note = ""
+    if missing:
+        missing_note = (
+            "<div class=\"summary-card\"><div class=\"summary-title\">Missing Pricing</div>"
+            "<div class=\"summary-body\">Provide pricing.json with unit_cost per model to complete the refresh budget. Missing models: "
+            + _he(", ".join(sorted(missing)[:12]))
+            + ".</div></div>"
+        )
+
+    summary_card = (
+        "<div class=\"summary-card\"><div class=\"summary-title\">8-Year Refresh Reserve</div>"
+        "<div class=\"summary-body\">"
+        f"Estimated total replacement cost: <strong>${total_cost:,.0f}</strong><br>"
+        f"Suggested annual reserve (based on replacement cycles): <strong>${annual_reserve:,.0f}</strong>"
+        "</div></div>"
+    )
+
+    return f"""
+    <section id="budget-forecast" class="report-section">
+      <h2>12. Hardware Cost &amp; Refresh Plan</h2>
+      <p>This section estimates an 8-year hardware refresh reserve using inventory counts and optional pricing inputs. Provide a pricing map to replace placeholders with actual budget numbers.</p>
+      {summary_card}
+      {render_section("Model Cost Rollup", [["Model", "Count", "Unit Cost", "Extended", "Cycle (yrs)", "Annual Reserve"]] + rows)}
+      {missing_note}
     </section>
     """
 
@@ -715,7 +836,7 @@ def _build_wan_capacity_section(
 
     return f"""
     <section id="wan-capacity" class="report-section">
-      <h2>11. Internet Capacity &amp; Utilization</h2>
+      <h2>13. Internet Capacity &amp; Utilization</h2>
       <p>This section summarizes current MX WAN uplink state and the maximum internet capacity exposed by the current backup. When Meraki uplink usage history is available, the report also estimates sustained load, observed peak load, and how frequently the circuit approaches its own observed peak during the sampled period.</p>
       <div class="summary-card">
         <div class="summary-title">WAN Snapshot</div>

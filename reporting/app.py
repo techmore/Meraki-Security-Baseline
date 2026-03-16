@@ -23,6 +23,8 @@ from .common import (
 from .topology import _topo_pages, _topo_summary_rows, _topo_svg
 from .sections import (
     _build_ap_interference_section,
+    _build_budget_forecast_section,
+    _build_config_coverage_section,
     _build_switch_detail_section,
     _build_wan_capacity_section,
 )
@@ -100,6 +102,11 @@ def build_org_report(
     wireless_ssids = load_json(os.path.join(org_dir, "wireless_ssids.json")) or {}
     alerts_history = load_json(os.path.join(org_dir, "alerts_history.json")) or {}
     wireless_mesh_statuses = load_json(os.path.join(org_dir, "wireless_mesh_statuses.json")) or {}
+    pricing_payload = (
+        load_json(os.path.join(org_dir, "pricing.json"))
+        or load_json(os.path.join(BASE_DIR, "pricing.json"))
+        or {}
+    )
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
@@ -562,6 +569,8 @@ def build_org_report(
         wireless_stats,
         switch_port_statuses_by_switch,
     )
+    config_coverage_html = _build_config_coverage_section(org_dir, networks)
+    budget_forecast_html = _build_budget_forecast_section(inventory_summary, pricing_payload)
     wan_capacity_html = _build_wan_capacity_section(
         uplink_statuses,
         appliance_uplinks_usage,
@@ -621,18 +630,26 @@ def build_org_report(
         </li>
         <li>
           <span class="toc-num">11</span>
-          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
+          <span class="toc-entry">Configuration Backup Coverage</span>
         </li>
         <li>
           <span class="toc-num">12</span>
-          <span class="toc-entry">AP Interference Audit</span>
+          <span class="toc-entry">Hardware Cost &amp; Refresh Plan</span>
         </li>
         <li>
           <span class="toc-num">13</span>
-          <span class="toc-entry">Client Analysis</span>
+          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
         </li>
         <li>
           <span class="toc-num">14</span>
+          <span class="toc-entry">AP Interference Audit</span>
+        </li>
+        <li>
+          <span class="toc-num">15</span>
+          <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">16</span>
           <span class="toc-entry">Switch Deep Dive</span>
           <ol class="toc-sub">
             {toc_switch_subitems}
@@ -687,18 +704,26 @@ def build_org_report(
         </li>
         <li>
           <span class="toc-num">10</span>
-          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
+          <span class="toc-entry">Configuration Backup Coverage</span>
         </li>
         <li>
           <span class="toc-num">11</span>
-          <span class="toc-entry">AP Interference Audit</span>
+          <span class="toc-entry">Hardware Cost &amp; Refresh Plan</span>
         </li>
         <li>
           <span class="toc-num">12</span>
-          <span class="toc-entry">Client Analysis</span>
+          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
         </li>
         <li>
           <span class="toc-num">13</span>
+          <span class="toc-entry">AP Interference Audit</span>
+        </li>
+        <li>
+          <span class="toc-num">14</span>
+          <span class="toc-entry">Client Analysis</span>
+        </li>
+        <li>
+          <span class="toc-num">15</span>
           <span class="toc-entry">Switch Deep Dive</span>
           <ol class="toc-sub">
             {toc_switch_subitems}
@@ -2416,7 +2441,7 @@ def build_org_report(
 
     client_analysis_html = f"""
     <section id="client-analysis" class="report-section">
-      <h2>13. Client Analysis</h2>
+      <h2>15. Client Analysis</h2>
       <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
          in this backup. Wired client detail requires switch port client data which is not
          collected in the current pipeline.</p>
@@ -2425,7 +2450,7 @@ def build_org_report(
     """
 
     # =========================================================
-    # SECTION 14: UNIFI COMPARISON & REFRESH PLANNING
+    # SECTION 17: UNIFI COMPARISON & REFRESH PLANNING
     # =========================================================
     # Heuristic model mapping: Meraki family -> UniFi equivalent + indicative USD street price
     # Prices are published MSRP / street estimates (2025–2026) and carry a planning-only disclaimer.
@@ -2543,7 +2568,7 @@ def build_org_report(
 
     unifi_html = f"""
     <section id="unifi-comparison" class="report-section">
-      <h2>15. UniFi Comparison &amp; Refresh Planning</h2>
+      <h2>17. UniFi Comparison &amp; Refresh Planning</h2>
       <p>This section provides a heuristic cost comparison between the current Meraki
          environment and a notional UniFi replacement. It is a planning estimate only — not
          a procurement quote or a recommendation to replace. Prices are approximate 2025–2026
@@ -2656,6 +2681,8 @@ def build_org_report(
         + recommendations_html
         + cis8_html
         + licensing_html
+        + config_coverage_html
+        + budget_forecast_html
         + wan_capacity_html
         + ap_interference_html
         + client_analysis_html
@@ -2676,6 +2703,8 @@ def build_org_report(
         + recommendations_html
         + cis8_html
         + licensing_html
+        + config_coverage_html
+        + budget_forecast_html
         + wan_capacity_html
         + ap_interference_html
         + client_analysis_html
