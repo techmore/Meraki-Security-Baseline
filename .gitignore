@@ -76,3 +76,6 @@ meraki_backup_*/
 meraki_backup_sample_*/
 */report.pdf
 */report.html
+
+# Claude Code local session data
+.claude/
