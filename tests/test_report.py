@@ -69,6 +69,12 @@ class TestBuildOrgReport:
         """The fixture has 1 failing IPS check — it should appear in report."""
         assert "Intrusion Prevention" in report_html
 
+    def test_title_case_security_failure_drives_posture(self, report_html):
+        """Persisted title-case Fail values must not be treated as healthy."""
+        assert "Action required" in report_html
+        assert "Posture is satisfactory" not in report_html
+        assert "0 fails" not in report_html
+
     def test_licensing_expired_rendered(self, report_html):
         """Fixture has one expired license key."""
         assert "Expired" in report_html or "expired" in report_html.lower()

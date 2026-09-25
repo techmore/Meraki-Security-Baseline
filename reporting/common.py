@@ -18,6 +18,37 @@ REPORT_VERSION = "1.0"
 EXPECTED_BACKUP_SCHEMA_VERSION = 1
 
 
+def normalize_security_status(value: Any) -> str:
+    """Return the canonical status used by security scoring and rendering.
+
+    Backup producers persist human-readable values such as ``Pass`` and
+    ``Warning``.  Missing or unfamiliar values are informational rather than
+    successful so an incomplete collection cannot create false assurance.
+    """
+    status = re.sub(r"[\s_-]+", " ", str(value or "").strip().lower())
+    aliases = {
+        "pass": "pass",
+        "passed": "pass",
+        "ok": "pass",
+        "healthy": "pass",
+        "fail": "fail",
+        "failed": "fail",
+        "warning": "warning",
+        "warn": "warning",
+        "info": "info",
+        "informational": "info",
+        "unknown": "info",
+        "not assessed": "info",
+        "not evaluated": "info",
+        "not available": "info",
+        "unavailable": "info",
+        "n/a": "info",
+        "na": "info",
+        "": "info",
+    }
+    return aliases.get(status, "info")
+
+
 def read_backup_meta(org_dir: str) -> Dict[str, Any]:
     """Load backup_meta.json if present; return {} if missing (pre-versioning backup)."""
     path = os.path.join(org_dir, "backup_meta.json")
@@ -181,7 +212,7 @@ def render_security_baseline(checks: List[Dict[str, Any]]) -> str:
     )
     table_rows = ""
     for check in checks:
-        status = check.get("status", "Unknown").lower()
+        status = normalize_security_status(check.get("status"))
         status_class = ""
         if status == "pass":
             status_class = "check-pass"
@@ -191,10 +222,11 @@ def render_security_baseline(checks: List[Dict[str, Any]]) -> str:
             status_class = "check-warning"
         else:
             status_class = "check-unknown"
+        status_label = status.title()
         table_rows += (
             f'<tr><td>{_he(check.get("networkName", "Organization"))}</td>'
             f'<td>{_he(check.get("check", ""))}</td>'
-            f'<td class="{status_class}">{_he(check.get("status", ""))}</td>'
+            f'<td class="{status_class}">{_he(status_label)}</td>'
             f'<td>{_he(check.get("description", ""))}</td>'
             f'<td>{_he(check.get("remediation", ""))}</td></tr>'
         )
@@ -206,29 +238,51 @@ def build_fallback_security_checks(
     devices_avail: List[Dict[str, Any]],
     inv_by_type: Dict[str, int],
     switch_port_issues: List[Dict[str, Any]],
+    port_data_available: bool = False,
 ) -> List[Dict[str, Any]]:
+    """Build conservative checks when an appliance baseline is unavailable.
+
+    Only observations backed by collected telemetry receive Pass or Fail.  The
+    remaining controls are explicitly informational so the report distinguishes
+    an uncollected control from a verified healthy control.
+    """
+    valid_devices = [d for d in devices_avail if isinstance(d, dict)]
+    device_statuses = {
+        str(d.get("status", "")).strip().lower() for d in valid_devices
+    }
+    if not valid_devices:
+        device_online_status = "Info"
+        device_online_description = "Device availability data was not collected"
+    elif device_statuses.intersection({"offline", "alerting", "down", "failed"}):
+        device_online_status = "Fail"
+        device_online_description = "One or more managed devices are not reporting healthy"
+    elif device_statuses and device_statuses.issubset({"online"}):
+        device_online_status = "Pass"
+        device_online_description = "All managed devices reporting online"
+    else:
+        device_online_status = "Info"
+        device_online_description = "Device availability includes unrecognized or incomplete statuses"
+
     return [
         {
             "networkName": "Organization",
             "check": "Device Online Status",
-            "status": "Pass"
-            if all(d.get("status") == "online" for d in devices_avail)
-            else "Fail",
-            "description": "All managed devices reporting online",
+            "status": device_online_status,
+            "description": device_online_description,
             "remediation": "Investigate offline devices; check physical connections, power, and uplink paths",
         },
         {
             "networkName": "Organization",
             "check": "Default Password Check",
-            "status": "Pass",
-            "description": "Verify no devices are using default credentials",
+            "status": "Info",
+            "description": "Credential posture was not collected in this backup",
             "remediation": "Audit all device credentials and rotate any defaults",
         },
         {
             "networkName": "Organization",
             "check": "SSH Access Restriction",
-            "status": "Warning" if inv_by_type.get("switch", 0) > 0 else "Info",
-            "description": "SSH should be restricted to management networks only",
+            "status": "Info",
+            "description": "SSH access policy was not collected in this backup",
             "remediation": "Configure SSH ACLs; use VPN or jump host for remote management",
         },
         {
@@ -241,22 +295,26 @@ def build_fallback_security_checks(
         {
             "networkName": "Organization",
             "check": "Wireless Encryption Standards",
-            "status": "Pass",
-            "description": "WPA2-Enterprise or WPA3 should be used on all SSIDs",
+            "status": "Info",
+            "description": "Wireless encryption settings were not collected in this backup",
             "remediation": "Update any open or WPA-Personal SSIDs to enterprise-grade encryption",
         },
         {
             "networkName": "Organization",
             "check": "Port Security Configuration",
-            "status": "Fail" if switch_port_issues else "Pass",
-            "description": "Check for port errors, duplex mismatches, and speed degradation",
+            "status": "Fail" if switch_port_issues else ("Pass" if port_data_available else "Info"),
+            "description": (
+                "Port telemetry was collected with no reported issues"
+                if port_data_available and not switch_port_issues
+                else "Check for port errors, duplex mismatches, and speed degradation"
+            ),
             "remediation": "Resolve port issues; consider 802.1X port authentication",
         },
         {
             "networkName": "Organization",
             "check": "Logging and Monitoring",
-            "status": "Warning",
-            "description": "Ensure syslog and SNMP traps are configured for security events",
+            "status": "Info",
+            "description": "Centralized logging and monitoring configuration was not collected",
             "remediation": "Configure centralized logging and alerting for critical network events",
         },
     ]
@@ -487,4 +545,3 @@ def _speed_label(speed: str) -> str:
 def _is_sfp_like_port(port_id: str) -> bool:
     text = str(port_id or "").upper()
     return "_" in text or text.startswith("SFP") or "NM" in text or text.startswith("X")
-

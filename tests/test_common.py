@@ -14,6 +14,7 @@ from reporting.common import (
     read_backup_meta,
     render_security_baseline,
     build_fallback_security_checks,
+    normalize_security_status,
     _he,
 )
 
@@ -99,6 +100,13 @@ class TestRenderSecurityBaseline:
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
 
+    def test_unknown_status_is_rendered_as_info(self):
+        checks = [{"networkName": "Main", "check": "Uncollected", "status": "",
+                   "description": "No telemetry", "remediation": "Collect it"}]
+        html = render_security_baseline(checks)
+        assert "check-unknown" in html
+        assert ">Info<" in html
+
 
 # ── build_fallback_security_checks ───────────────────────────────────────────
 
@@ -126,6 +134,28 @@ class TestBuildFallbackSecurityChecks:
         port_check = next((c for c in checks if c["check"] == "Port Security Configuration"), None)
         assert port_check is not None
         assert port_check["status"] == "Fail"
+
+    def test_empty_evidence_does_not_produce_passes(self):
+        checks = build_fallback_security_checks([], {}, [])
+        assert all(c["status"] != "Pass" for c in checks)
+        assert next(c for c in checks if c["check"] == "Device Online Status")["status"] == "Info"
+        assert next(c for c in checks if c["check"] == "Wireless Encryption Standards")["status"] == "Info"
+        assert next(c for c in checks if c["check"] == "Port Security Configuration")["status"] == "Info"
+
+    def test_collected_clean_port_telemetry_can_pass(self):
+        checks = build_fallback_security_checks([], {}, [], port_data_available=True)
+        port_check = next(c for c in checks if c["check"] == "Port Security Configuration")
+        assert port_check["status"] == "Pass"
+
+
+class TestNormalizeSecurityStatus:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("Pass", "pass"), ("FAIL", "fail"), ("warning", "warning"),
+         ("not evaluated", "info"), (None, "info"), ("unexpected", "info")],
+    )
+    def test_canonical_status(self, value, expected):
+        assert normalize_security_status(value) == expected
 
 
 # ── _he HTML escaping ─────────────────────────────────────────────────────────

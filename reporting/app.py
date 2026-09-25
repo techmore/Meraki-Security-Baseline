@@ -17,6 +17,7 @@ from .common import (
     find_org_dirs,
     load_json,
     md_to_html,
+    normalize_security_status,
     render_kpi_row,
     render_section,
     render_security_baseline,
@@ -358,7 +359,12 @@ def build_org_report(
     security_checks = (
         security_baseline.get("checks")
         if isinstance(security_baseline, dict) and security_baseline.get("checks")
-        else build_fallback_security_checks(devices_avail, inv_by_type, switch_port_issues)
+        else build_fallback_security_checks(
+            devices_avail,
+            inv_by_type,
+            switch_port_issues,
+            port_data_available=bool(switch_port_statuses),
+        )
     )
 
     # ── Health at a Glance domain scoring ──────────────────────────────────
@@ -444,15 +450,21 @@ def build_org_report(
     _wan_card = _hcard("WAN / Internet", _wan_rating, _wan_stat, _wan_detail)
 
     # Security
-    _sec_fail  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "fail")
-    _sec_warn  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "warning")
-    _sec_pass  = sum(1 for c in (security_checks or []) if isinstance(c, dict) and c.get("status") == "pass")
+    _security_statuses = [
+        normalize_security_status(c.get("status"))
+        for c in (security_checks or [])
+        if isinstance(c, dict)
+    ]
+    _sec_fail = _security_statuses.count("fail")
+    _sec_warn = _security_statuses.count("warning")
+    _sec_pass = _security_statuses.count("pass")
+    _sec_info = _security_statuses.count("info")
     if _sec_fail > 0:
         _sec_rating = "crit"
     elif _sec_warn > 0:
         _sec_rating = "warn"
     else:
-        _sec_rating = "good" if _sec_pass > 0 else "info"
+        _sec_rating = "good" if _sec_pass > 0 and _sec_info == 0 else "info"
     _sec_card = _hcard(
         "Security Baseline", _sec_rating,
         f"{_sec_fail} fail{'s' if _sec_fail != 1 else ''} · {_sec_warn} warn{'s' if _sec_warn != 1 else ''}",
@@ -1928,31 +1940,47 @@ def build_org_report(
     # Per-category pass/fail summary rows
     _sec_cat_rows = ""
     for _cat, _items in sorted(_sec_by_cat.items()):
-        _cat_pass = sum(1 for c in _items if c.get("status", "").lower() == "pass")
-        _cat_fail = sum(1 for c in _items if c.get("status", "").lower() == "fail")
-        _cat_warn = sum(1 for c in _items if c.get("status", "").lower() == "warning")
+        _cat_statuses = [normalize_security_status(c.get("status")) for c in _items]
+        _cat_pass = _cat_statuses.count("pass")
+        _cat_fail = _cat_statuses.count("fail")
+        _cat_warn = _cat_statuses.count("warning")
+        _cat_info = _cat_statuses.count("info")
         if _cat_fail:
             _cat_cls = "check-fail"
         elif _cat_warn:
             _cat_cls = "check-warning"
+        elif _cat_info:
+            _cat_cls = "check-unknown"
         else:
             _cat_cls = "check-pass"
         _net_names = ", ".join(sorted({c.get("networkName", "Org") for c in _items}))
         _detail = _items[0].get("description", "") if len(_items) == 1 else f"{len(_items)} networks evaluated"
+        _cat_result = (
+            "❌ Fail" if _cat_fail
+            else ("⚠ Warning" if _cat_warn
+                  else ("– Info" if _cat_info else "✔ Pass"))
+        )
         _sec_cat_rows += (
             f"<tr>"
             f"<td><strong>{_he(_cat)}</strong></td>"
             f'<td class="{_cat_cls}">'
-            f'{"❌ Fail" if _cat_fail else ("⚠ Warning" if _cat_warn else "✔ Pass")}'
+            f"{_cat_result}"
             f"</td>"
-            f"<td>{_cat_pass + _cat_warn + _cat_fail} sites</td>"
+            f"<td>{len(_items)} sites</td>"
             f"<td>{_he(_detail)}</td>"
             f"</tr>"
         )
 
     # Port forwarding posture summary
     _pf_checks = [c for c in security_checks if "port forwarding" in c.get("check", "").lower()]
-    _pf_exposed = [c for c in _pf_checks if c.get("status", "").lower() != "pass"]
+    _pf_exposed = [
+        c for c in _pf_checks
+        if normalize_security_status(c.get("status")) in {"fail", "warning"}
+    ]
+    _pf_unknown = [
+        c for c in _pf_checks
+        if normalize_security_status(c.get("status")) == "info"
+    ]
     if _pf_exposed:
         _pf_note = (
             f"<strong class='text-crit'>{len(_pf_exposed)} site(s) have internet-exposed port "
@@ -1966,6 +1994,11 @@ def build_org_report(
             f"{len(_pf_checks)} site(s) evaluated. Continue to review forwarding rules "
             "periodically as application requirements change."
         )
+    elif _pf_unknown:
+        _pf_note = (
+            f"Port forwarding posture could not be verified for {len(_pf_unknown)} site(s) "
+            "because the collected baseline did not include an evaluable result."
+        )
     else:
         _pf_note = (
             "Port forwarding posture could not be evaluated — appliance baseline data not "
@@ -1974,7 +2007,12 @@ def build_org_report(
 
     # Overall security posture framing
     _sec_summary = security_baseline.get("summary", {}) if isinstance(security_baseline, dict) else {}
-    _sec_total = sum(_sec_summary.values()) if _sec_summary else len(security_checks)
+    _summary_total = (
+        sum(int(value) for value in _sec_summary.values() if isinstance(value, int) and value >= 0)
+        if isinstance(_sec_summary, dict)
+        else 0
+    )
+    _sec_total = max(_summary_total, len(_security_statuses))
     if _sec_fail > 0:
         _sec_posture = (
             f"<strong class='text-crit'>Action required</strong> — {_sec_fail} check(s) failing "
@@ -1986,6 +2024,12 @@ def build_org_report(
             f"<strong>Attention advised</strong> — {_sec_warn} check(s) in warning state. "
             "No critical failures detected, but warning-level gaps should be scheduled for "
             "remediation to harden posture proactively."
+        )
+    elif _sec_info > 0:
+        _sec_posture = (
+            f"<strong>Assessment incomplete</strong> — {_sec_info} check(s) could not be "
+            f"verified out of {_sec_total} evaluated. Treat informational results as "
+            "unknown until the required telemetry is collected."
         )
     else:
         _sec_posture = (
