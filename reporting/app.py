@@ -44,6 +44,7 @@ from .sections import (
 from .best_practices import build_best_practice_checks, render_best_practice_section
 from .html_shell import build_html, write_pdf
 from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
+from .section_registry import render_report_sections, render_toc
 
 log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -765,12 +766,10 @@ def _build_org_report_variants(
     """
 
     # =========================================================
-    # TABLE OF CONTENTS PAGE
+    # REPORT SECTION BUILDERS
     # =========================================================
-    toc_site_items = "".join(
-        f'<li class="toc-sub-item">{_he(net_data["name"])}</li>'
-        for net_data in sorted(devices_by_network.values(), key=lambda x: x["name"])
-    )
+    # The section registry and TOCs are assembled after all section bodies exist.
+    # Build the reusable section fragments here without coupling them to a TOC.
     switch_deep_dive_html, toc_switch_items = _build_switch_detail_section(
         devices_by_network,
         lldp_cdp,
@@ -797,169 +796,6 @@ def _build_org_report_variants(
         networks,
         inbound_firewall_rules_by_network,
     )
-    toc_switch_subitems = "".join(
-        f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
-        for anchor, label in toc_switch_items
-    )
-    toc_html = f"""
-    <section class="toc-page">
-      <div class="toc-header">Table of Contents</div>
-      <ol class="toc-list">
-        <li>
-          <span class="toc-num">1</span>
-          <span class="toc-entry">Executive Summary</span>
-        </li>
-        <li>
-          <span class="toc-num">2</span>
-          <span class="toc-entry">Network Overview</span>
-        </li>
-        <li>
-          <span class="toc-num">3</span>
-          <span class="toc-entry">Network Topology</span>
-          <ol class="toc-sub">
-            {toc_site_items}
-          </ol>
-        </li>
-        <li>
-          <span class="toc-num">4</span>
-          <span class="toc-entry">Traffic Flows &amp; Bottleneck Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">5</span>
-          <span class="toc-entry">Device Health &amp; Issues</span>
-        </li>
-        <li>
-          <span class="toc-num">6</span>
-          <span class="toc-entry">PoE Power Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">7</span>
-          <span class="toc-entry">Security Baseline</span>
-        </li>
-        <li>
-          <span class="toc-num">8</span>
-          <span class="toc-entry">Recommendations &amp; Implementation Plan</span>
-        </li>
-        <li>
-          <span class="toc-num">9</span>
-          <span class="toc-entry">CIS 8 Controls Assessment</span>
-        </li>
-        <li>
-          <span class="toc-num">10</span>
-          <span class="toc-entry">Licensing Summary</span>
-        </li>
-        <li>
-          <span class="toc-num">11</span>
-          <span class="toc-entry">Configuration Backup Coverage</span>
-        </li>
-        <li>
-          <span class="toc-num">12</span>
-          <span class="toc-entry">Hardware Cost &amp; Refresh Plan</span>
-        </li>
-        <li>
-          <span class="toc-num">13</span>
-          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
-        </li>
-        <li>
-          <span class="toc-num">14</span>
-          <span class="toc-entry">AP Interference Audit</span>
-        </li>
-        <li>
-          <span class="toc-num">15</span>
-          <span class="toc-entry">Client Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">16</span>
-          <span class="toc-entry">Switch Deep Dive</span>
-          <ol class="toc-sub">
-            {toc_switch_subitems}
-          </ol>
-        </li>
-        <li>
-          <span class="toc-num">17</span>
-          <span class="toc-entry">UniFi Comparison &amp; Refresh Planning</span>
-        </li>
-      </ol>
-    </section>
-    """
-
-    toc_backup_html = f"""
-    <section class="toc-page">
-      <div class="toc-header">Table of Contents</div>
-      <ol class="toc-list">
-        <li>
-          <span class="toc-num">1</span>
-          <span class="toc-entry">Network Overview</span>
-        </li>
-        <li>
-          <span class="toc-num">2</span>
-          <span class="toc-entry">Network Topology</span>
-          <ol class="toc-sub">
-            {toc_site_items}
-          </ol>
-        </li>
-        <li>
-          <span class="toc-num">3</span>
-          <span class="toc-entry">Traffic Flows &amp; Bottleneck Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">4</span>
-          <span class="toc-entry">Device Health &amp; Issues</span>
-        </li>
-        <li>
-          <span class="toc-num">5</span>
-          <span class="toc-entry">PoE Power Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">6</span>
-          <span class="toc-entry">Security Baseline</span>
-        </li>
-        <li>
-          <span class="toc-num">7</span>
-          <span class="toc-entry">Recommendations &amp; Implementation Plan</span>
-        </li>
-        <li>
-          <span class="toc-num">8</span>
-          <span class="toc-entry">CIS 8 Controls Assessment</span>
-        </li>
-        <li>
-          <span class="toc-num">9</span>
-          <span class="toc-entry">Licensing Summary</span>
-        </li>
-        <li>
-          <span class="toc-num">10</span>
-          <span class="toc-entry">Configuration Backup Coverage</span>
-        </li>
-        <li>
-          <span class="toc-num">11</span>
-          <span class="toc-entry">Hardware Cost &amp; Refresh Plan</span>
-        </li>
-        <li>
-          <span class="toc-num">12</span>
-          <span class="toc-entry">Internet Capacity &amp; Utilization</span>
-        </li>
-        <li>
-          <span class="toc-num">13</span>
-          <span class="toc-entry">AP Interference Audit</span>
-        </li>
-        <li>
-          <span class="toc-num">14</span>
-          <span class="toc-entry">Client Analysis</span>
-        </li>
-        <li>
-          <span class="toc-num">15</span>
-          <span class="toc-entry">Switch Deep Dive</span>
-          <ol class="toc-sub">
-            {toc_switch_subitems}
-          </ol>
-        </li>
-        <li>
-          <span class="toc-num">16</span>
-          <span class="toc-entry">UniFi Comparison &amp; Refresh Planning</span>
-        </li>
-      </ol>
-    </section>
-    """
 
     # =========================================================
     # SECTION 1: EXECUTIVE SUMMARY  (fills its own page)
@@ -3009,6 +2845,44 @@ def _build_org_report_variants(
     </section>
     """
 
+    toc_site_items = "".join(
+        f'<li class="toc-sub-item">{_he(net_data["name"])}</li>'
+        for net_data in sorted(devices_by_network.values(), key=lambda x: x["name"])
+    )
+    toc_switch_subitems = "".join(
+        f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
+        for anchor, label in toc_switch_items
+    )
+    toc_html = render_toc(
+        "full",
+        site_items=toc_site_items,
+        switch_subitems=toc_switch_subitems,
+    )
+    toc_backup_html = render_toc(
+        "backup",
+        site_items=toc_site_items,
+        switch_subitems=toc_switch_subitems,
+    )
+    section_bodies = {
+        "executive_summary": exec_html,
+        "network_overview": network_overview_html,
+        "network_topology": topology_html,
+        "traffic_flows": traffic_html,
+        "device_issues": issues_html,
+        "poe_analysis": poe_html,
+        "security_baseline": security_html,
+        "recommendations": recommendations_html,
+        "cis8": cis8_html,
+        "licensing": licensing_html,
+        "config_coverage": config_coverage_html,
+        "budget_forecast": budget_forecast_html,
+        "wan_capacity": wan_capacity_html,
+        "ap_interference": ap_interference_html,
+        "client_analysis": client_analysis_html,
+        "switch_deep_dive": switch_deep_dive_html,
+        "unifi_comparison": unifi_html,
+    }
+
     _unique_data_quality_warnings = list(dict.fromkeys(_data_quality_warnings))
     _data_quality_banner = ""
     if _unique_data_quality_warnings:
@@ -3035,23 +2909,7 @@ def _build_org_report_variants(
         + _schema_banner
         + _data_quality_banner
         + toc_html
-        + exec_html
-        + network_overview_html
-        + topology_html
-        + traffic_html
-        + issues_html
-        + poe_html
-        + security_html
-        + recommendations_html
-        + cis8_html
-        + licensing_html
-        + config_coverage_html
-        + budget_forecast_html
-        + wan_capacity_html
-        + ap_interference_html
-        + client_analysis_html
-        + switch_deep_dive_html
-        + unifi_html
+        + render_report_sections(section_bodies, "full")
     )
     exec_body = cover_html + _schema_banner + _data_quality_banner + exec_html
     backup_body = (
@@ -3059,22 +2917,7 @@ def _build_org_report_variants(
         + _schema_banner
         + _data_quality_banner
         + toc_backup_html
-        + network_overview_html
-        + topology_html
-        + traffic_html
-        + issues_html
-        + poe_html
-        + security_html
-        + recommendations_html
-        + cis8_html
-        + licensing_html
-        + config_coverage_html
-        + budget_forecast_html
-        + wan_capacity_html
-        + ap_interference_html
-        + client_analysis_html
-        + switch_deep_dive_html
-        + unifi_html
+        + render_report_sections(section_bodies, "backup")
     )
 
     return {
