@@ -692,7 +692,7 @@ def build_org_report(
     # TABLE OF CONTENTS PAGE
     # =========================================================
     toc_site_items = "".join(
-        f'<li class="toc-sub-item">{net_data["name"]}</li>'
+        f'<li class="toc-sub-item">{_he(net_data["name"])}</li>'
         for net_data in sorted(devices_by_network.values(), key=lambda x: x["name"])
     )
     switch_deep_dive_html, toc_switch_items = _build_switch_detail_section(
@@ -1140,7 +1140,7 @@ def build_org_report(
 
         network_overview_rows.append(
             f"<tr>"
-            f"<td><strong>{net_data['name']}</strong></td>"
+            f"<td><strong>{_he(net_data['name'])}</strong></td>"
             f"<td>{len(appliances)}</td>"
             f"<td>{len(switches)}</td>"
             f"<td>{len(aps)}</td>"
@@ -1166,7 +1166,7 @@ def build_org_report(
 
         network_hardware_rows.append(
             f"<tr>"
-            f"<td><strong>{net_data['name']}</strong></td>"
+            f"<td><strong>{_he(net_data['name'])}</strong></td>"
             f"<td>{_he(_model_rollup(appliances))}</td>"
             f"<td>{_he(_model_rollup(switches))}</td>"
             f"<td>{_he(_model_rollup(aps))}</td>"
@@ -1415,7 +1415,7 @@ def build_org_report(
         aps        = [d for d in nd if d.get("productType") == "wireless"]
 
         sec = f'<div class="building-section">'
-        sec += f"<h3>{net_name}</h3>"
+        sec += f"<h3>{_he(net_name)}</h3>"
 
         # ── Path summary bar ───────────────────────────────────────────────
         _path_parts = []
@@ -1495,9 +1495,9 @@ def build_org_report(
                 sec += (
                     f'<div class="device-card-header">'
                     f"<strong>{_he(_name)}</strong>"
-                    f' <code class="serial">{_serial}</code>'
+                    f' <code class="serial">{_he(str(_serial))}</code>'
                     f' <span class="badge">{_he(_model)}</span>'
-                    f' <span class="badge {_s_cls}">{_status}</span>'
+                    f' <span class="badge {_s_cls}">{_he(str(_status))}</span>'
                     f"</div>"
                 )
                 if _uplink_rows:
@@ -1543,9 +1543,9 @@ def build_org_report(
                 sec += (
                     f'<div class="device-card-header">'
                     f"<strong>{_he(sw_name)}</strong>"
-                    f' <code class="serial">{serial}</code>'
+                    f' <code class="serial">{_he(str(serial))}</code>'
                     f' <span class="badge">{_he(sw_model)}</span>'
-                    f' <span class="badge {status_cls}">{sw_status}</span>'
+                    f' <span class="badge {status_cls}">{_he(str(sw_status))}</span>'
                 )
                 if poe_watts > 0:
                     _poe_cls = "badge-fail" if poe_watts > 100 else ("badge-warn" if poe_watts > 60 else "badge-info")
@@ -1645,7 +1645,7 @@ def build_org_report(
                         )
                         _ap_notes = []
                         if _ap_status != "online":
-                            _ap_notes.append(f'<span class="badge badge-fail">{_ap_status}</span>')
+                            _ap_notes.append(f'<span class="badge badge-fail">{_he(str(_ap_status))}</span>')
                         if _tot_util > 70:
                             _ap_notes.append('<span class="badge badge-fail">High util</span>')
                         if _non80211 > 20:
@@ -1657,7 +1657,7 @@ def build_org_report(
                             f"<tr>"
                             f"<td>{_he(_ap_name)}</td>"
                             f"<td><code>{_he(_ap_model)}</code></td>"
-                            f'<td><span class="badge {_ap_s_cls}">{_ap_status}</span></td>'
+                            f'<td><span class="badge {_ap_s_cls}">{_he(str(_ap_status))}</span></td>'
                             f'<td><span class="badge {_util_cls}">{_tot_util:.0f}%</span></td>'
                             f"<td>{_tx_util:.0f}%</td>"
                             f"<td>{_non80211:.0f}%</td>"
@@ -1700,7 +1700,7 @@ def build_org_report(
                     f"<tr>"
                     f"<td>{_he(_nm)}</td>"
                     f"<td><code>{_he(_mod)}</code></td>"
-                    f'<td><span class="badge {_scls}">{_st}</span></td>'
+                    f'<td><span class="badge {_scls}">{_he(str(_st))}</span></td>'
                     f'<td><span class="badge {_ucls}">{_tu:.0f}%</span></td>'
                     f"<td>{_tx:.0f}%</td><td>{_n80:.0f}%</td>"
                     f"<td>{_af if _af else '—'}</td><td>{_auf if _auf else '—'}</td>"
@@ -1723,7 +1723,7 @@ def build_org_report(
             if not _client_bal:
                 _rf_notes.append("Client load balancing is <strong>disabled</strong> — uneven client distribution across APs is more likely")
             if _5g_width not in ("auto", "80", "40"):
-                _rf_notes.append(f"5 GHz channel width is set to <strong>{_5g_width}</strong> — verify this is intentional for the environment density")
+                _rf_notes.append(f"5 GHz channel width is set to <strong>{_he(str(_5g_width))}</strong> — verify this is intentional for the environment density")
 
             sec += (
                 '<div class="summary-card" style="margin-top:12px">'
@@ -1782,13 +1782,13 @@ def build_org_report(
             err_display = ", ".join(issue["errors"]) if issue["errors"] else "—"
             issues_html += (
                 f"<tr>"
-                f"<td>{issue['switch']}</td>"
-                f"<td>{issue['port']}</td>"
-                f"<td>{err_display}</td>"
-                f"<td>{issue['speed']}</td>"
-                f"<td>{issue['duplex']}</td>"
-                f"<td>{issue['poeMode']}</td>"
-                f"<td>{issue['status']}</td>"
+                f"<td>{_he(str(issue['switch']))}</td>"
+                f"<td>{_he(str(issue['port']))}</td>"
+                f"<td>{_he(err_display)}</td>"
+                f"<td>{_he(str(issue['speed']))}</td>"
+                f"<td>{_he(str(issue['duplex']))}</td>"
+                f"<td>{_he(str(issue['poeMode']))}</td>"
+                f"<td>{_he(str(issue['status']))}</td>"
                 f"</tr>"
             )
         issues_html += "</tbody></table>"
@@ -1805,10 +1805,10 @@ def build_org_report(
         for issue in config_issues[:15]:
             issues_html += (
                 f"<tr>"
-                f"<td>{issue['switch']}</td>"
-                f"<td>{issue['port']}</td>"
-                f"<td>{issue['issue']}</td>"
-                f"<td>{issue['type']}</td>"
+                f"<td>{_he(str(issue['switch']))}</td>"
+                f"<td>{_he(str(issue['port']))}</td>"
+                f"<td>{_he(str(issue['issue']))}</td>"
+                f"<td>{_he(str(issue['type']))}</td>"
                 f"</tr>"
             )
         issues_html += "</tbody></table>"
@@ -1828,7 +1828,7 @@ def build_org_report(
         for device in high_util_devices[:20]:
             issues_html += (
                 f"<tr>"
-                f"<td>{device.get('serial', 'Unknown')}</td>"
+                f"<td>{_he(str(device.get('serial', 'Unknown')))}</td>"
                 f"<td>{safe_float(device.get('utilizationTotal')):.1f}%</td>"
                 f"<td>{safe_float(device.get('utilizationNon80211')):.1f}%</td>"
                 f"<td>{safe_float(device.get('utilization80211Tx')):.1f}%</td>"

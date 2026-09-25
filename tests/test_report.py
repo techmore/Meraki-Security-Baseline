@@ -67,6 +67,23 @@ class TestBuildOrgReport:
         html = build_org_report(FIXTURES, '<script>alert("xss")</script>')
         assert '<script>alert("xss")</script>' not in html
 
+    def test_api_names_are_escaped_in_report_body(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        payload = '</td><script>alert(1)</script><img src=x onerror="alert(2)">'
+        devices = json.loads((org_dir / "devices_availabilities.json").read_text())
+        devices[0]["name"] = payload
+        devices[0]["network"]["name"] = payload
+        (org_dir / "devices_availabilities.json").write_text(json.dumps(devices))
+
+        html = build_org_report(str(org_dir), "Test Org")
+
+        assert "<script>" not in html
+        assert "<img src=x" not in html
+        assert "&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
     def test_security_fail_check_rendered(self, report_html):
         """The fixture has 1 failing IPS check — it should appear in report."""
         assert "Intrusion Prevention" in report_html

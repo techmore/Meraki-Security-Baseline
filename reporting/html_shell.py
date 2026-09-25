@@ -2,10 +2,108 @@ import logging
 import os
 import shutil
 import subprocess
+from html import escape as _he
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 from .common import REPORT_VERSION
 
 log = logging.getLogger(__name__)
+
+
+_SAFE_TAGS = {
+    "a", "br", "circle", "code", "div", "em", "g", "h1", "h2", "h3", "h4",
+    "i", "li", "line", "ol", "p", "rect", "section", "span", "strong", "svg",
+    "table", "tbody", "td", "text", "tfoot", "th", "thead", "tr", "ul",
+}
+_SAFE_ATTRS = {
+    "class", "colspan", "cx", "cy", "fill", "fill-opacity", "font-size", "font-weight",
+    "height", "href", "id", "opacity", "paint-order", "r", "rx", "stroke",
+    "stroke-dasharray", "stroke-width", "style", "text-anchor", "title", "viewBox",
+    "width", "x", "x1", "x2", "xmlns", "viewbox", "y", "y1", "y2",
+}
+_ATTR_OUTPUT_NAMES = {"viewbox": "viewBox"}
+_DROP_TAGS = {"base", "embed", "form", "iframe", "input", "link", "meta", "object", "script", "style", "textarea"}
+_UNSAFE_CSS = ("expression(", "javascript:", "@import", "url(")
+
+
+def _safe_href(value: str) -> str | None:
+    """Allow report anchors and ordinary web links, never executable schemes."""
+    parsed = urlsplit(value)
+    if value.startswith("#"):
+        return value
+    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc != "":
+        return value
+    if parsed.scheme.lower() == "mailto" and parsed.path:
+        return value
+    return None
+
+
+class _ReportFragmentSanitizer(HTMLParser):
+    """Keep generated report markup while neutralizing injected HTML behavior."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._dropped_depth = 0
+
+    def _start_tag(self, tag: str, attrs: list[tuple[str, str | None]], self_closing: bool = False) -> None:
+        tag = tag.lower()
+        if self._dropped_depth:
+            if tag in _DROP_TAGS:
+                self._dropped_depth += 1
+            return
+        if tag in _DROP_TAGS:
+            self._dropped_depth = 1
+            return
+        if tag not in _SAFE_TAGS:
+            return
+        safe_attrs = []
+        for name, value in attrs:
+            attr = name.lower()
+            if attr.startswith("on") or attr in {"src", "srcdoc", "xlink:href"}:
+                continue
+            if attr not in _SAFE_ATTRS and not attr.startswith(("aria-", "data-")):
+                continue
+            text = "" if value is None else str(value)
+            if attr == "href":
+                text = _safe_href(text)
+                if text is None:
+                    continue
+            if attr == "style" and any(token in text.lower() for token in _UNSAFE_CSS):
+                continue
+            output_name = _ATTR_OUTPUT_NAMES.get(attr, attr)
+            safe_attrs.append(f' {output_name}="{_he(text, quote=True)}"')
+        suffix = " />" if self_closing else ">"
+        self.parts.append(f"<{tag}{''.join(safe_attrs)}{suffix}")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._start_tag(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._start_tag(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._dropped_depth:
+            if tag in _DROP_TAGS:
+                self._dropped_depth -= 1
+            return
+        if tag in _SAFE_TAGS:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self._dropped_depth:
+            self.parts.append(_he(data, quote=False))
+
+
+def sanitize_html_fragment(fragment: str) -> str:
+    """Return a safe HTML fragment for report content assembled from API data."""
+    parser = _ReportFragmentSanitizer()
+    parser.feed(str(fragment))
+    parser.close()
+    return "".join(parser.parts)
+
 
 def build_html(doc_title: str, body: str) -> str:
     return f"""
@@ -13,7 +111,7 @@ def build_html(doc_title: str, body: str) -> str:
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>{doc_title}</title>
+  <title>{_he(str(doc_title), quote=True)}</title>
   <style>
     /* Fonts — no CDN dependency; uses locally-installed copies when available */
     @font-face {{
@@ -1149,7 +1247,7 @@ def build_html(doc_title: str, body: str) -> str:
   </style>
 </head>
 <body>
-{body}
+  {sanitize_html_fragment(body)}
 </body>
 </html>
 """
