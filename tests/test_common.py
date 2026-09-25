@@ -14,7 +14,10 @@ from reporting.common import (
     read_backup_meta,
     render_security_baseline,
     build_fallback_security_checks,
+    load_json_checked,
     normalize_security_status,
+    parse_datetime,
+    safe_float,
     _he,
 )
 
@@ -65,6 +68,46 @@ class TestCheckBackupSchema:
     def test_fixture_meta_is_compatible(self):
         warnings = check_backup_schema(FIXTURES)
         assert warnings == [], f"Fixture meta triggered warnings: {warnings}"
+
+
+class TestCheckedArtifactLoading:
+    def test_invalid_json_is_reported_and_defaulted(self, tmp_path):
+        path = tmp_path / "devices.json"
+        path.write_text("{invalid json}")
+        warnings = []
+        assert load_json_checked(str(path), list, [], warnings) == []
+        assert "devices.json" in warnings[0]
+
+    def test_wrong_top_level_type_is_reported_and_defaulted(self, tmp_path):
+        path = tmp_path / "networks.json"
+        path.write_text(json.dumps({"unexpected": True}))
+        warnings = []
+        assert load_json_checked(str(path), list, [], warnings) == []
+        assert "expected list" in warnings[0]
+
+    def test_error_envelope_is_reported_and_defaulted(self, tmp_path):
+        path = tmp_path / "telemetry.json"
+        path.write_text(json.dumps({"error": "HTTP 500"}))
+        warnings = []
+        assert load_json_checked(str(path), dict, {}, warnings) == {}
+        assert "error envelope" in warnings[0]
+
+    def test_missing_file_is_a_normal_coverage_gap(self, tmp_path):
+        warnings = []
+        assert load_json_checked(str(tmp_path / "missing.json"), list, [], warnings) == []
+        assert warnings == []
+
+
+class TestSafeValueNormalization:
+    def test_safe_float_defaults_for_non_numeric_value(self):
+        assert safe_float("not-a-number") == 0.0
+
+    def test_parse_datetime_normalizes_naive_and_aware_values(self):
+        naive = parse_datetime("2026-09-25T12:00:00")
+        aware = parse_datetime("2026-09-25T08:00:00-04:00")
+        assert naive is not None and naive.tzinfo is not None
+        assert aware is not None and aware.tzinfo is not None
+        assert naive == aware
 
 
 # ── render_security_baseline ─────────────────────────────────────────────────

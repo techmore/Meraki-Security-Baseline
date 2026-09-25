@@ -16,11 +16,15 @@ from .common import (
     check_backup_schema,
     find_org_dirs,
     load_json,
+    load_json_checked,
     md_to_html,
     normalize_security_status,
+    parse_datetime,
     render_kpi_row,
     render_section,
     render_security_baseline,
+    safe_float,
+    safe_int,
 )
 from .topology import _topo_pages, _topo_summary_rows, _topo_svg
 from .sections import (
@@ -44,6 +48,7 @@ def build_org_report(
 ) -> str:
     # ── Schema compatibility check ────────────────────────────────────────────
     _schema_warnings = check_backup_schema(org_dir)
+    _data_quality_warnings: List[str] = []
     _schema_banner = ""
     if _schema_warnings:
         for _w in _schema_warnings:
@@ -58,24 +63,41 @@ def build_org_report(
     rec_path = os.path.join(org_dir, "recommendations.md")
     rec_md = ""
     if os.path.exists(rec_path):
-        with open(rec_path, "r", encoding="utf-8") as f:
-            rec_md = f.read()
+        try:
+            with open(rec_path, "r", encoding="utf-8") as f:
+                rec_md = f.read()
+        except (OSError, UnicodeError) as exc:
+            _data_quality_warnings.append(f"recommendations.md could not be read: {exc}")
 
-    # Load all relevant data files
-    inventory_summary = load_json(os.path.join(org_dir, "inventory_summary.json")) or {}
-    poe_summary = load_json(os.path.join(org_dir, "poe_power_summary.json")) or {}
-    channel_util = (
-        load_json(os.path.join(org_dir, "channel_utilization_by_device.json")) or {}
-    )
-    devices_avail = (
-        load_json(os.path.join(org_dir, "devices_availabilities.json")) or []
-    )
-    lldp_cdp = load_json(os.path.join(org_dir, "lldp_cdp.json")) or {}
-    wireless_stats = (
-        load_json(os.path.join(org_dir, "wireless_connection_stats.json")) or {}
-    )
+    # Load all relevant data files through a small validation boundary. Missing
+    # artifacts remain coverage gaps; malformed artifacts are named in a banner
+    # and replaced with safe defaults before section code sees them.
+    def _load_artifact(
+        filename: str,
+        expected_type: Any,
+        default: Any,
+        required: bool = False,
+    ) -> Any:
+        path = os.path.join(org_dir, filename)
+        if required and not os.path.exists(path):
+            _data_quality_warnings.append(
+                f"{filename} is missing; associated report sections have incomplete coverage"
+            )
+        return load_json_checked(
+            path,
+            expected_type,
+            default,
+            _data_quality_warnings,
+        )
+
+    inventory_summary = _load_artifact("inventory_summary.json", dict, {}, required=True)
+    poe_summary = _load_artifact("poe_power_summary.json", dict, {})
+    channel_util = _load_artifact("channel_utilization_by_device.json", list, [])
+    devices_avail = _load_artifact("devices_availabilities.json", list, [], required=True)
+    lldp_cdp = _load_artifact("lldp_cdp.json", dict, {})
+    wireless_stats = _load_artifact("wireless_connection_stats.json", dict, {})
     # wireless_clients.json is {net_id: [client, …]} — flatten to a single list
-    _wc_raw = load_json(os.path.join(org_dir, "wireless_clients.json")) or {}
+    _wc_raw = _load_artifact("wireless_clients.json", (dict, list), {})
     if isinstance(_wc_raw, dict):
         wireless_clients = [
             cl for clients in _wc_raw.values()
@@ -87,36 +109,39 @@ def build_org_report(
         wireless_clients = [cl for cl in _wc_raw if isinstance(cl, dict)]
     else:
         wireless_clients = []
-    switch_port_statuses_by_switch = (
-        load_json(os.path.join(org_dir, "switch_port_statuses.json")) or {}
+    switch_port_statuses_by_switch = _load_artifact(
+        "switch_port_statuses.json", (dict, list), {}, required=True
     )
-    switch_port_configs_by_switch = (
-        load_json(os.path.join(org_dir, "switch_port_configs.json")) or {}
-    )
-    uplink_statuses = load_json(os.path.join(org_dir, "uplink_statuses.json")) or []
-    appliance_uplinks_usage = load_json(os.path.join(org_dir, "appliance_uplinks_usage.json")) or {}
-    devices_statuses_raw = load_json(os.path.join(org_dir, "devices_statuses.json")) or []
-    clients_overview_raw = load_json(os.path.join(org_dir, "clients_overview.json")) or {}
-    licensing_data = load_json(os.path.join(org_dir, "licensing.json")) or {}
-    rf_profiles = load_json(os.path.join(org_dir, "wireless_rf_profiles.json")) or {}
-    inventory_devices = load_json(os.path.join(org_dir, "inventory_devices.json")) or []
-    firmware_upgrades = load_json(os.path.join(org_dir, "firmware_upgrades.json")) or []
-    wireless_settings = load_json(os.path.join(org_dir, "wireless_settings.json")) or {}
-    wireless_ssids = load_json(os.path.join(org_dir, "wireless_ssids.json")) or {}
-    alerts_history = load_json(os.path.join(org_dir, "alerts_history.json")) or {}
-    wireless_mesh_statuses = load_json(os.path.join(org_dir, "wireless_mesh_statuses.json")) or {}
-    pricing_payload = (
-        load_json(os.path.join(org_dir, "pricing.json"))
-        or load_json(os.path.join(BASE_DIR, "pricing.json"))
-        or {}
-    )
+    switch_port_configs_by_switch = _load_artifact("switch_port_configs.json", (dict, list), {})
+    uplink_statuses = _load_artifact("uplink_statuses.json", list, [], required=True)
+    appliance_uplinks_usage = _load_artifact("appliance_uplinks_usage.json", dict, {})
+    devices_statuses_raw = _load_artifact("devices_statuses.json", list, [])
+    clients_overview_raw = _load_artifact("clients_overview.json", dict, {})
+    licensing_data = _load_artifact("licensing.json", (list, dict), {})
+    rf_profiles = _load_artifact("wireless_rf_profiles.json", dict, {})
+    inventory_devices = _load_artifact("inventory_devices.json", list, [])
+    firmware_upgrades = _load_artifact("firmware_upgrades.json", list, [])
+    wireless_settings = _load_artifact("wireless_settings.json", dict, {})
+    wireless_ssids = _load_artifact("wireless_ssids.json", dict, {})
+    alerts_history = _load_artifact("alerts_history.json", dict, {})
+    wireless_mesh_statuses = _load_artifact("wireless_mesh_statuses.json", dict, {})
+    pricing_payload = _load_artifact("pricing.json", dict, {})
+    if not pricing_payload:
+        pricing_payload = load_json_checked(
+            os.path.join(BASE_DIR, "pricing.json"),
+            dict,
+            {},
+            _data_quality_warnings,
+        )
 
     # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
     # injecting switchSerial so downstream code can reference the parent switch.
-    def _flatten_ports(path: str) -> List[Dict]:
-        raw = load_json(path) or {}
+    def _flatten_ports(raw: Any, label: str) -> List[Dict]:
         if isinstance(raw, list):
-            return raw
+            return [p for p in raw if isinstance(p, dict)]
+        if not isinstance(raw, dict):
+            _data_quality_warnings.append(f"{label} could not be normalized into port records")
+            return []
         result = []
         for serial, ports in raw.items():
             if isinstance(ports, list):
@@ -126,14 +151,10 @@ def build_org_report(
                         result.append(p)
         return result
 
-    switch_port_configs = _flatten_ports(
-        os.path.join(org_dir, "switch_port_configs.json")
-    )
-    switch_port_statuses = _flatten_ports(
-        os.path.join(org_dir, "switch_port_statuses.json")
-    )
-    networks = load_json(os.path.join(org_dir, "networks.json")) or []
-    security_baseline = load_json(os.path.join(org_dir, "security_baseline.json")) or {}
+    switch_port_configs = _flatten_ports(switch_port_configs_by_switch, "switch_port_configs.json")
+    switch_port_statuses = _flatten_ports(switch_port_statuses_by_switch, "switch_port_statuses.json")
+    networks = _load_artifact("networks.json", list, [], required=True)
+    security_baseline = _load_artifact("security_baseline.json", dict, {}, required=True)
     org_dirs = find_org_dirs(BACKUPS_DIR)
     network_names = {
         n.get("id"): n.get("name", n.get("id", ""))
@@ -141,13 +162,11 @@ def build_org_report(
         if isinstance(n, dict) and n.get("id")
     }
 
-    def _parse_dt(value: str) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
+    def _parse_dt(value: str, artifact: str = "timestamp") -> datetime | None:
+        parsed = parse_datetime(value)
+        if value and parsed is None:
+            _data_quality_warnings.append(f"{artifact} contains an invalid timestamp")
+        return parsed
 
     eox_devices = []
     lifecycle_by_network: Dict[str, Dict[str, int]] = {}
@@ -156,7 +175,10 @@ def build_org_report(
             if not isinstance(dev, dict):
                 continue
             eox = dev.get("eox") or {}
-            status = (eox.get("status") or "").lower()
+            if not isinstance(eox, dict):
+                _data_quality_warnings.append("inventory_devices.json contains a non-object eox field")
+                eox = {}
+            status = str(eox.get("status") or "").lower()
             net_name = network_names.get(dev.get("networkId"), "Unassigned")
             if status:
                 lifecycle_by_network.setdefault(net_name, {})
@@ -176,8 +198,11 @@ def build_org_report(
     device_status_counts: Dict[str, int] = {}
     device_type_counts: Dict[str, int] = {}
     for device in devices_avail:
-        status = device.get("status", "unknown")
-        product_type = device.get("productType", "unknown")
+        if not isinstance(device, dict):
+            _data_quality_warnings.append("devices_availabilities.json contains a non-object row")
+            continue
+        status = str(device.get("status") or "unknown")
+        product_type = str(device.get("productType") or "unknown")
         device_status_counts[status] = device_status_counts.get(status, 0) + 1
         device_type_counts[product_type] = device_type_counts.get(product_type, 0) + 1
 
@@ -190,17 +215,37 @@ def build_org_report(
         if isinstance(poe_summary, dict)
         else []
     )
+    if not isinstance(poe_ports, list):
+        _data_quality_warnings.append("poe_power_summary.json.port_poe_totals is not a list")
+        poe_ports = []
+    if not isinstance(poe_switches, list):
+        _data_quality_warnings.append("poe_power_summary.json.switch_poe_totals is not a list")
+        poe_switches = []
+    poe_switches = [s for s in poe_switches if isinstance(s, dict)]
+    poe_ports = [p for p in poe_ports if isinstance(p, dict)]
     poe_by_serial = {s.get("serial", ""): s for s in poe_switches}
 
     # Channel utilization analysis
     if isinstance(channel_util, list):
+        _valid_channel_util = []
+        for _channel_row in channel_util:
+            if not isinstance(_channel_row, dict):
+                _data_quality_warnings.append("channel_utilization_by_device.json contains a non-object row")
+                continue
+            _utilization = safe_float(_channel_row.get("utilizationTotal"), None)
+            if _utilization is None:
+                _data_quality_warnings.append(
+                    "channel_utilization_by_device.json contains a non-numeric utilizationTotal"
+                )
+                continue
+            _valid_channel_util.append(_channel_row)
         high_util_devices = [
-            d for d in channel_util if float(d.get("utilizationTotal", 0)) > 70
+            d for d in _valid_channel_util if safe_float(d.get("utilizationTotal")) > 70
         ]
         moderate_util_devices = [
-            d for d in channel_util if 30 <= float(d.get("utilizationTotal", 0)) <= 70
+            d for d in _valid_channel_util if 30 <= safe_float(d.get("utilizationTotal")) <= 70
         ]
-        ap_util_by_serial = {d.get("serial", ""): d for d in channel_util}
+        ap_util_by_serial = {d.get("serial", ""): d for d in _valid_channel_util}
     else:
         high_util_devices = []
         moderate_util_devices = []
@@ -209,9 +254,9 @@ def build_org_report(
     # Build AP-to-switch mapping from LLDP/CDP data
     # lldp_cdp: {switch_serial: {ports: {port_id: {lldp/cdp: {...}}}}}
     _mac_to_serial: Dict[str, str] = {
-        d.get("mac", "").lower().replace(":", ""): d.get("serial", "")
+        str(d.get("mac", "")).lower().replace(":", ""): d.get("serial", "")
         for d in devices_avail
-        if d.get("mac") and d.get("serial")
+        if isinstance(d, dict) and d.get("mac") and d.get("serial")
     }
     ap_to_switch: Dict[str, Dict] = {}   # ap_serial -> {switch, port}
     switch_to_aps: Dict[str, list] = {}  # switch_serial -> [ap_serial, ...]
@@ -219,21 +264,30 @@ def build_org_report(
         for sw_serial, sw_lldp in lldp_cdp.items():
             if not isinstance(sw_lldp, dict):
                 continue
-            for port_id, port_data in sw_lldp.get("ports", {}).items():
+            _lldp_ports = sw_lldp.get("ports", {})
+            if not isinstance(_lldp_ports, dict):
+                _data_quality_warnings.append("lldp_cdp.json contains a non-object ports field")
+                continue
+            for port_id, port_data in _lldp_ports.items():
                 if not isinstance(port_data, dict):
                     continue
                 _lldp = port_data.get("lldp") or {}
                 _cdp  = port_data.get("cdp")  or {}
-                _desc = (
+                if not isinstance(_lldp, dict):
+                    _lldp = {}
+                if not isinstance(_cdp, dict):
+                    _cdp = {}
+                _desc = str(
                     _lldp.get("systemDescription")
                     or _cdp.get("platform")
                     or ""
                 ).lower()
                 if "mr" not in _desc and "access point" not in _desc:
                     continue
-                _mac = (
+                _mac = str(
                     _lldp.get("chassisId")
                     or port_data.get("deviceMac", "")
+                    or ""
                 ).lower().replace(":", "").replace("-", "")
                 _ap_serial = _mac_to_serial.get(_mac)
                 if _ap_serial:
@@ -252,19 +306,31 @@ def build_org_report(
             if isinstance(_ap_list, list):
                 for _entry in _ap_list:
                     if isinstance(_entry, dict) and _entry.get("serial"):
-                        ap_conn_stats[_entry["serial"]] = _entry.get("connectionStats", {})
+                        _connection_stats = _entry.get("connectionStats", {})
+                        ap_conn_stats[_entry["serial"]] = (
+                            _connection_stats if isinstance(_connection_stats, dict) else {}
+                        )
 
     # Switch port issue analysis
     # Note: the Meraki API returns "errors" and "warnings" as lists of strings, not integers.
     switch_port_issues = []
     if isinstance(switch_port_statuses, list):
         for port in switch_port_statuses[:100]:
+            if not isinstance(port, dict):
+                _data_quality_warnings.append("switch_port_statuses.json contains a non-object port row")
+                continue
             port_errors = port.get("errors") or []  # always a list
             if isinstance(port_errors, str):
                 port_errors = [port_errors]
+            elif not isinstance(port_errors, list):
+                port_errors = [str(port_errors)]
+            port_errors = [str(error) for error in port_errors]
             port_warnings = port.get("warnings") or []
             if isinstance(port_warnings, str):
                 port_warnings = [port_warnings]
+            elif not isinstance(port_warnings, list):
+                port_warnings = [str(port_warnings)]
+            port_warnings = [str(warning) for warning in port_warnings]
             speed_raw = port.get("speed") or ""
             # speed may be "10 Mbps", "100 Mbps", 10, 100, etc.
             speed_num = None
@@ -298,6 +364,9 @@ def build_org_report(
     config_issues = []
     if isinstance(switch_port_configs, list):
         for port in switch_port_configs[:100]:
+            if not isinstance(port, dict):
+                _data_quality_warnings.append("switch_port_configs.json contains a non-object port row")
+                continue
             if port.get("enabled") == False and port.get("poeEnabled") == True:
                 config_issues.append(
                     {
@@ -321,13 +390,20 @@ def build_org_report(
     devices_by_network: Dict[str, dict] = {}
     serial_to_network: Dict[str, dict] = {}
     for device in devices_avail:
+        if not isinstance(device, dict):
+            _data_quality_warnings.append("devices_availabilities.json contains a non-object network row")
+            continue
         net = device.get("network") or {}
-        net_id = net.get("id", "unassigned")
+        if not isinstance(net, dict):
+            _data_quality_warnings.append("devices_availabilities.json contains a non-object network field")
+            net = {}
+        net_id = str(net.get("id") or "unassigned")
         net_name = (
             net.get("name")
             or (networks_by_id.get(net_id) or {}).get("name")
             or "Unassigned"
         )
+        net_name = str(net_name)
         serial = device.get("serial", "")
         if net_id not in devices_by_network:
             devices_by_network[net_id] = {"name": net_name, "id": net_id, "devices": []}
@@ -336,8 +412,51 @@ def build_org_report(
             serial_to_network[serial] = {"id": net_id, "name": net_name}
 
     # Inventory summary
-    inv_by_type = inventory_summary.get("by_type") or {}
-    top_models = inventory_summary.get("top_models") or []
+    inv_by_type_raw = inventory_summary.get("by_type") if isinstance(inventory_summary, dict) else {}
+    inv_by_type: Dict[str, int] = {}
+    if isinstance(inv_by_type_raw, dict):
+        for _product_type, _count in inv_by_type_raw.items():
+            _normalized_count = safe_int(_count, None)
+            if _normalized_count is None:
+                _data_quality_warnings.append(
+                    f"inventory_summary.json contains a non-numeric count for {_product_type}"
+                )
+                continue
+            inv_by_type[str(_product_type)] = max(0, _normalized_count)
+    elif inv_by_type_raw:
+        _data_quality_warnings.append("inventory_summary.json.by_type is not an object")
+
+    top_models_raw = inventory_summary.get("top_models") if isinstance(inventory_summary, dict) else []
+    top_models = []
+    if isinstance(top_models_raw, list):
+        for _model_row in top_models_raw:
+            if not isinstance(_model_row, (list, tuple)) or len(_model_row) < 2:
+                _data_quality_warnings.append("inventory_summary.json contains an invalid top_models row")
+                continue
+            _model_count = safe_int(_model_row[1], None)
+            if _model_count is None:
+                _data_quality_warnings.append(
+                    f"inventory_summary.json contains a non-numeric count for model {_model_row[0]}"
+                )
+                continue
+            top_models.append((str(_model_row[0]), max(0, _model_count)))
+    elif top_models_raw:
+        _data_quality_warnings.append("inventory_summary.json.top_models is not a list")
+    _by_model_raw = inventory_summary.get("by_model") if isinstance(inventory_summary, dict) else {}
+    _by_model: Dict[str, int] = {}
+    if isinstance(_by_model_raw, dict):
+        for _model, _count in _by_model_raw.items():
+            _normalized_count = safe_int(_count, None)
+            if _normalized_count is None:
+                _data_quality_warnings.append(
+                    f"inventory_summary.json contains a non-numeric model count for {_model}"
+                )
+                continue
+            _by_model[str(_model)] = max(0, _normalized_count)
+    elif _by_model_raw:
+        _data_quality_warnings.append("inventory_summary.json.by_model is not an object")
+    inventory_summary = dict(inventory_summary)
+    inventory_summary["by_model"] = _by_model
     total_devices = sum(inv_by_type.values()) if inv_by_type else len(devices_avail)
 
     # KPI items (compact row — kept for TOC/overview tables)
@@ -356,16 +475,24 @@ def build_org_report(
         ("Config Issues", str(len(config_issues))),
     ]
 
-    security_checks = (
+    _security_checks_raw = (
         security_baseline.get("checks")
-        if isinstance(security_baseline, dict) and security_baseline.get("checks")
-        else build_fallback_security_checks(
+        if isinstance(security_baseline, dict)
+        else None
+    )
+    if isinstance(_security_checks_raw, list) and all(
+        isinstance(check, dict) for check in _security_checks_raw
+    ) and _security_checks_raw:
+        security_checks = _security_checks_raw
+    else:
+        if _security_checks_raw not in (None, [], {}):
+            _data_quality_warnings.append("security_baseline.json.checks is not a list of objects")
+        security_checks = build_fallback_security_checks(
             devices_avail,
             inv_by_type,
             switch_port_issues,
             port_data_available=bool(switch_port_statuses),
         )
-    )
 
     # ── Health at a Glance domain scoring ──────────────────────────────────
     def _hcard(domain: str, rating: str, stat: str, detail: str) -> str:
@@ -1152,7 +1279,7 @@ def build_org_report(
         "device_ip": {
             d["serial"]: d.get("lanIp", "")
             for d in (devices_statuses_raw if isinstance(devices_statuses_raw, list) else [])
-            if d.get("serial")
+            if isinstance(d, dict) and d.get("serial")
         },
         "uplink_statuses": uplink_statuses,
         "uplinks_usage": appliance_uplinks_usage,
@@ -1314,7 +1441,7 @@ def build_org_report(
         if aps:
             _ap_high = sum(
                 1 for a in aps
-                if float((ap_util_by_serial.get(a.get("serial","")) or {}).get("utilizationTotal", 0)) > 70
+                if safe_float((ap_util_by_serial.get(a.get("serial", "")) or {}).get("utilizationTotal")) > 70
             )
             _ap_cls = "badge-fail" if _ap_high else "badge-ok"
             _path_parts.append(
@@ -1406,7 +1533,7 @@ def build_org_report(
                 sw_status = sw.get("status", "unknown")
                 status_cls = "badge-ok" if sw_status == "online" else "badge-fail"
                 poe_data = poe_by_serial.get(serial, {})
-                poe_watts = float(poe_data.get("avgWatts", 0)) if poe_data else 0.0
+                poe_watts = safe_float(poe_data.get("avgWatts")) if poe_data else 0.0
                 sw_issues = port_issues_by_switch.get(serial, [])
                 sw_ap_serials = switch_to_aps.get(serial, [])
                 sw_ap_devices = [
@@ -1502,13 +1629,13 @@ def build_org_report(
                         _ap_status  = _ap.get("status", "unknown")
                         _ap_s_cls   = "badge-ok" if _ap_status == "online" else "badge-fail"
                         _util       = ap_util_by_serial.get(_ap_serial) or {}
-                        _tot_util   = float(_util.get("utilizationTotal", 0))
-                        _tx_util    = float(_util.get("utilization80211Tx", 0))
-                        _non80211   = float(_util.get("utilizationNon80211", 0))
+                        _tot_util   = safe_float(_util.get("utilizationTotal"))
+                        _tx_util    = safe_float(_util.get("utilization80211Tx"))
+                        _non80211   = safe_float(_util.get("utilizationNon80211"))
                         _conn       = ap_conn_stats.get(_ap_serial) or {}
-                        _assoc_fail = int(_conn.get("assoc", 0))
-                        _auth_fail  = int(_conn.get("auth", 0))
-                        _success    = int(_conn.get("success", 0))
+                        _assoc_fail = safe_int(_conn.get("assoc"))
+                        _auth_fail  = safe_int(_conn.get("auth"))
+                        _success    = safe_int(_conn.get("success"))
                         _total_att  = _assoc_fail + _auth_fail + _success
                         _fail_rate  = round(100 * (_assoc_fail + _auth_fail) / _total_att) if _total_att else 0
 
@@ -1562,12 +1689,12 @@ def build_org_report(
                 _mod = _ap.get("model", "")
                 _st  = _ap.get("status", "unknown")
                 _util = ap_util_by_serial.get(_s) or {}
-                _tu  = float(_util.get("utilizationTotal", 0))
-                _tx  = float(_util.get("utilization80211Tx", 0))
-                _n80 = float(_util.get("utilizationNon80211", 0))
+                _tu  = safe_float(_util.get("utilizationTotal"))
+                _tx  = safe_float(_util.get("utilization80211Tx"))
+                _n80 = safe_float(_util.get("utilizationNon80211"))
                 _conn = ap_conn_stats.get(_s) or {}
-                _af  = int(_conn.get("assoc", 0))
-                _auf = int(_conn.get("auth", 0))
+                _af  = safe_int(_conn.get("assoc"))
+                _auf = safe_int(_conn.get("auth"))
                 _ucls = "badge-fail" if _tu > 70 else ("badge-warn" if _tu > 30 else "badge-ok")
                 _scls = "badge-ok" if _st == "online" else "badge-fail"
                 sec += (
@@ -1703,10 +1830,10 @@ def build_org_report(
             issues_html += (
                 f"<tr>"
                 f"<td>{device.get('serial', 'Unknown')}</td>"
-                f"<td>{float(device.get('utilizationTotal', 0)):.1f}%</td>"
-                f"<td>{float(device.get('utilizationNon80211', 0)):.1f}%</td>"
-                f"<td>{float(device.get('utilization80211Tx', 0)):.1f}%</td>"
-                f"<td>{float(device.get('utilization80211Rx', 0)):.1f}%</td>"
+                f"<td>{safe_float(device.get('utilizationTotal')):.1f}%</td>"
+                f"<td>{safe_float(device.get('utilizationNon80211')):.1f}%</td>"
+                f"<td>{safe_float(device.get('utilization80211Tx')):.1f}%</td>"
+                f"<td>{safe_float(device.get('utilization80211Rx')):.1f}%</td>"
                 f"</tr>"
             )
         issues_html += "</tbody></table>"
@@ -1804,18 +1931,35 @@ def build_org_report(
         for item in firmware_upgrades:
             if not isinstance(item, dict):
                 continue
-            dt = _parse_dt(item.get("time", ""))
+            dt = _parse_dt(item.get("time", ""), "firmware_upgrades.json.time")
             if not dt and item.get("completedAt"):
                 try:
-                    dt = datetime.strptime(item["completedAt"], "%Y-%m-%d %H:%M:%S UTC")
+                    dt = datetime.strptime(item["completedAt"], "%Y-%m-%d %H:%M:%S UTC").replace(
+                        tzinfo=timezone.utc
+                    )
                 except ValueError:
+                    _data_quality_warnings.append(
+                        "firmware_upgrades.json.completedAt contains an invalid timestamp"
+                    )
                     dt = None
             fw_items.append((dt, item))
-        fw_items.sort(key=lambda x: x[0] or datetime.min, reverse=True)
+        fw_items.sort(
+            key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
         for dt, item in fw_items[:12]:
-            net = (item.get("network") or {}).get("name") or (item.get("network") or {}).get("id", "—")
-            to_ver = (item.get("toVersion") or {}).get("shortName") or (item.get("toVersion") or {}).get("firmware", "—")
-            from_ver = (item.get("fromVersion") or {}).get("shortName") or (item.get("fromVersion") or {}).get("firmware", "—")
+            _fw_network = item.get("network") or {}
+            _fw_to = item.get("toVersion") or {}
+            _fw_from = item.get("fromVersion") or {}
+            if not isinstance(_fw_network, dict):
+                _fw_network = {}
+            if not isinstance(_fw_to, dict):
+                _fw_to = {}
+            if not isinstance(_fw_from, dict):
+                _fw_from = {}
+            net = _fw_network.get("name") or _fw_network.get("id", "—")
+            to_ver = _fw_to.get("shortName") or _fw_to.get("firmware", "—")
+            from_ver = _fw_from.get("shortName") or _fw_from.get("firmware", "—")
             fw_rows.append([
                 net,
                 str(item.get("productTypes") or "—"),
@@ -1853,15 +1997,24 @@ def build_org_report(
             for alert in alerts:
                 if not isinstance(alert, dict):
                     continue
-                dt = _parse_dt(alert.get("occurredAt", ""))
+                dt = _parse_dt(alert.get("occurredAt", ""), "alerts_history.json.occurredAt")
+                _alert_device = alert.get("device") or {}
+                if not isinstance(_alert_device, dict):
+                    _alert_device = {}
                 alert_items.append({
                     "dt": dt,
                     "type": alert.get("alertType") or alert.get("alertTypeId") or "Alert",
-                    "device": (alert.get("device") or {}).get("name") or (alert.get("device") or {}).get("serial") or "—",
+                    "device": _alert_device.get("name") or _alert_device.get("serial") or "—",
                     "network": network_names.get(net_id, net_id),
                 })
-        alert_items.sort(key=lambda x: x["dt"] or datetime.min, reverse=True)
-        recent = [a for a in alert_items if a["dt"] and a["dt"] >= datetime.now(tz=a["dt"].tzinfo) - timedelta(days=30)]
+        alert_items.sort(
+            key=lambda x: x["dt"] or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        recent = [
+            a for a in alert_items
+            if a["dt"] and a["dt"] >= datetime.now(timezone.utc) - timedelta(days=30)
+        ]
         counts = Counter([a["type"] for a in recent])
         if counts:
             issues_html += render_section(
@@ -1902,8 +2055,8 @@ def build_org_report(
             [
                 [
                     s.get("serial", ""),
-                    f"{float(s.get('avgWatts', 0)):.1f} W",
-                    f"{float(s.get('powerUsageInWh', 0)):.1f} Wh",
+                    f"{safe_float(s.get('avgWatts')):.1f} W",
+                    f"{safe_float(s.get('powerUsageInWh')):.1f} Wh",
                 ]
                 for s in poe_switches[:20]
             ],
@@ -1915,7 +2068,7 @@ def build_org_report(
                 [
                     p.get("serial", ""),
                     p.get("portId", ""),
-                    f"{float(p.get('powerUsageInWh', 0)):.1f} Wh",
+                    f"{safe_float(p.get('powerUsageInWh')):.1f} Wh",
                 ]
                 for p in poe_ports[:20]
             ],
@@ -2260,8 +2413,11 @@ def build_org_report(
         _editions = _lic.get("editions") or []  # co-term: [{"edition": "Ent", "productType": "appliance"}]
         if _counts:
             _lic_type = ", ".join(
-                f"{c.get('count', '?')}× {c.get('model', '?')}" for c in _counts
+                f"{c.get('count', '?')}× {c.get('model', '?')}"
+                for c in _counts if isinstance(c, dict)
             )
+            if not _lic_type:
+                _lic_type = "—"
         else:
             _lic_type = _lic.get("licenseType") or _lic.get("productType") or "—"
         # Status — co-term uses expired bool; per-device uses status string
@@ -2283,8 +2439,11 @@ def build_org_report(
         _exp_date = _lic.get("expirationDate") or _lic.get("expiration") or "—"
         if _exp_date == "—" and _lic.get("startedAt") and _lic.get("duration"):
             try:
-                _started = datetime.fromisoformat(_lic["startedAt"].replace("Z", "+00:00"))
-                _exp_dt = _started + timedelta(days=int(_lic["duration"]))
+                _started = parse_datetime(_lic["startedAt"])
+                _duration = safe_int(_lic.get("duration"), None)
+                if _started is None or _duration is None:
+                    raise ValueError("invalid license timestamp or duration")
+                _exp_dt = _started + timedelta(days=_duration)
                 _exp_date = _exp_dt.strftime("%Y-%m-%d")
             except Exception:
                 pass
@@ -2713,9 +2872,31 @@ def build_org_report(
     </section>
     """
 
+    _unique_data_quality_warnings = list(dict.fromkeys(_data_quality_warnings))
+    _data_quality_banner = ""
+    if _unique_data_quality_warnings:
+        _warning_items = "".join(
+            f"<li>{_he(warning)}</li>"
+            for warning in _unique_data_quality_warnings[:12]
+        )
+        _more_warning = (
+            f"<li>{len(_unique_data_quality_warnings) - 12} additional data-quality warning(s) omitted from this banner.</li>"
+            if len(_unique_data_quality_warnings) > 12
+            else ""
+        )
+        _data_quality_banner = (
+            '<div class="data-quality-banner">'
+            "<strong>Data quality notice:</strong> One or more backup artifacts were "
+            "invalid or incomplete. Affected sections are degraded and should not be "
+            "treated as complete audit coverage."
+            f"<ul>{_warning_items}{_more_warning}</ul>"
+            "</div>"
+        )
+
     full_body = (
         cover_html
         + _schema_banner
+        + _data_quality_banner
         + toc_html
         + exec_html
         + network_overview_html
@@ -2735,10 +2916,11 @@ def build_org_report(
         + switch_deep_dive_html
         + unifi_html
     )
-    exec_body = cover_html + _schema_banner + exec_html
+    exec_body = cover_html + _schema_banner + _data_quality_banner + exec_html
     backup_body = (
         cover_html
         + _schema_banner
+        + _data_quality_banner
         + toc_backup_html
         + network_overview_html
         + topology_html

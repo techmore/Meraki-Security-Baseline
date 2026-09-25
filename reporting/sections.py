@@ -22,6 +22,8 @@ from .common import (
     _switch_anchor,
     _build_switch_link_narrative,
     render_section,
+    safe_float,
+    safe_int,
 )
 from .topology import _build_topology_facts
 
@@ -182,7 +184,7 @@ def _build_switch_detail_section(
         ]
         issue_count = len(port_issues_by_switch.get(serial, []))
         poe_data = poe_by_serial.get(serial, {})
-        poe_watts = float(poe_data.get("avgWatts", 0) or 0)
+        poe_watts = safe_float(poe_data.get("avgWatts")) if isinstance(poe_data, dict) else 0.0
         active_ports = sum(1 for port in ports if str(port.get("status") or "").lower() == "connected")
         uplink_ports = [port for port in ports if port.get("isUplink")]
         ranked_ports = sorted(
@@ -208,6 +210,10 @@ def _build_switch_detail_section(
             port_config = port_configs.get(port_id)
             usage = port.get("usageInKb") or {}
             traffic = port.get("trafficInKbps") or {}
+            if not isinstance(usage, dict):
+                usage = {}
+            if not isinstance(traffic, dict):
+                traffic = {}
             errors = port.get("errors") or []
             if isinstance(errors, str):
                 errors = [errors]
@@ -215,6 +221,8 @@ def _build_switch_detail_section(
             if isinstance(warnings, str):
                 warnings = [warnings]
             poe = port.get("poe") or {}
+            if not isinstance(poe, dict):
+                poe = {}
             power_wh = port.get("powerUsageInWh")
             indicators = []
             if port.get("isUplink"):
@@ -341,9 +349,12 @@ def _build_ap_interference_section(
         for band in row.get("byBand") or []:
             if not isinstance(band, dict):
                 continue
-            wifi = float(((band.get("wifi") or {}).get("percentage")) or 0)
-            non_wifi = float(((band.get("nonWifi") or {}).get("percentage")) or 0)
-            total = float(((band.get("total") or {}).get("percentage")) or 0)
+            wifi_data = band.get("wifi") or {}
+            non_wifi_data = band.get("nonWifi") or {}
+            total_data = band.get("total") or {}
+            wifi = safe_float(wifi_data.get("percentage") if isinstance(wifi_data, dict) else None)
+            non_wifi = safe_float(non_wifi_data.get("percentage") if isinstance(non_wifi_data, dict) else None)
+            total = safe_float(total_data.get("percentage") if isinstance(total_data, dict) else None)
             stats.append(
                 {
                     "band": str(band.get("band") or "?"),
@@ -363,9 +374,9 @@ def _build_ap_interference_section(
             if isinstance(item, dict) and item.get("serial") == serial:
                 conn = item.get("connectionStats") or {}
                 break
-        assoc = int((conn or {}).get("assoc") or 0)
-        auth = int((conn or {}).get("auth") or 0)
-        success = int((conn or {}).get("success") or 0)
+        assoc = safe_int((conn or {}).get("assoc"))
+        auth = safe_int((conn or {}).get("auth"))
+        success = safe_int((conn or {}).get("success"))
         if worst["non_wifi"] >= 25 or worst["total"] >= 75:
             severity = "High"
             severity_cls = "check-fail"
@@ -647,8 +658,8 @@ def _build_wan_capacity_section(
                         continue
                     if str(point.get("interface") or "").lower() != str(interface).lower():
                         continue
-                    recv = float(point.get("receivedKbps") or 0)
-                    sent = float(point.get("sentKbps") or 0)
+                    recv = safe_float(point.get("receivedKbps"))
+                    sent = safe_float(point.get("sentKbps"))
                     series.append(recv + sent)
             sustain = "Current snapshot only"
             peak = "Historical peak not collected"
@@ -817,9 +828,16 @@ def _build_budget_forecast_section(
     missing = []
     total_cost = 0.0
     annual_reserve = 0.0
-    for model, count in sorted(by_model.items(), key=lambda item: (-item[1], item[0])):
-        price = price_map.get(model, {}).get("unit_cost")
-        cycle = price_map.get(model, {}).get("replacement_cycle_years")
+    normalized_models = {
+        str(model): max(0, safe_int(count))
+        for model, count in by_model.items()
+    }
+    for model, count in sorted(normalized_models.items(), key=lambda item: (-item[1], item[0])):
+        price_entry = price_map.get(model, {})
+        if not isinstance(price_entry, dict):
+            price_entry = {}
+        price = price_entry.get("unit_cost")
+        cycle = price_entry.get("replacement_cycle_years")
         if price is None:
             missing.append(model)
             rows.append([model, str(count), "Missing", "—", "—", "—"])
@@ -830,7 +848,7 @@ def _build_budget_forecast_section(
             missing.append(model)
             rows.append([model, str(count), "Invalid", "—", "—", "—"])
             continue
-        ext = price * int(count)
+        ext = price * count
         cycle_years = int(cycle) if isinstance(cycle, (int, float, str)) and str(cycle).isdigit() else 8
         annual = ext / cycle_years if cycle_years else ext / 8
         total_cost += ext

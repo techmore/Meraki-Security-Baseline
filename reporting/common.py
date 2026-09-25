@@ -3,7 +3,7 @@ import logging
 import math
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as _he
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +47,82 @@ def normalize_security_status(value: Any) -> str:
         "": "info",
     }
     return aliases.get(status, "info")
+
+
+def safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    """Coerce API numeric values without allowing one malformed field to abort a report."""
+    if isinstance(value, bool) or value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def safe_int(value: Any, default: Optional[int] = 0) -> Optional[int]:
+    """Coerce integer-like API values while preserving a caller-provided fallback."""
+    if isinstance(value, bool) or value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def parse_datetime(value: Any) -> Optional[datetime]:
+    """Parse API timestamps and normalize both naive and aware values to UTC."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif value:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_json_checked(
+    path: str,
+    expected_type: Any,
+    default: Any,
+    warnings: Optional[List[str]] = None,
+) -> Any:
+    """Load one artifact and report invalid top-level data to the caller.
+
+    Missing files remain ordinary coverage gaps. Existing invalid JSON, error
+    envelopes, and unexpected top-level types are degraded to ``default`` and
+    surfaced in the report instead of failing deep inside a section renderer.
+    """
+    value = load_json(path)
+    if value is None:
+        if os.path.exists(path) and warnings is not None:
+            warnings.append(f"{os.path.basename(path)} is invalid JSON, unreadable, or null")
+        return default
+    if (
+        isinstance(value, dict) and "error" in value
+    ) or (
+        isinstance(value, list)
+        and any(isinstance(item, dict) and "error" in item for item in value)
+    ):
+        if warnings is not None:
+            warnings.append(f"{os.path.basename(path)} contains an API error envelope")
+        return default
+    if not isinstance(value, expected_type):
+        expected = expected_type if isinstance(expected_type, str) else ", ".join(
+            t.__name__ for t in expected_type
+        ) if isinstance(expected_type, tuple) else expected_type.__name__
+        if warnings is not None:
+            warnings.append(
+                f"{os.path.basename(path)} has top-level type {type(value).__name__}; "
+                f"expected {expected}"
+            )
+        return default
+    return value
 
 
 def read_backup_meta(org_dir: str) -> Dict[str, Any]:
@@ -504,8 +580,8 @@ def _hardware_consistency_note(top_models: List[Any]) -> str:
 def _port_heat_score(port: Dict[str, Any]) -> float:
     usage = port.get("usageInKb") or {}
     traffic = port.get("trafficInKbps") or {}
-    total_usage = float((usage or {}).get("total") or 0)
-    current_kbps = float((traffic or {}).get("total") or 0)
+    total_usage = safe_float((usage or {}).get("total") if isinstance(usage, dict) else None)
+    current_kbps = safe_float((traffic or {}).get("total") if isinstance(traffic, dict) else None)
     score = 0.0
     if total_usage > 0:
         score += min(60.0, max(0.0, (math.log10(total_usage + 1) - 2.0) * 15.0))

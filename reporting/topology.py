@@ -2,6 +2,8 @@ import re
 from collections import deque
 from typing import Any, Dict, List, Tuple
 
+from .common import safe_float
+
 # ── Network topology SVG ─────────────────────────────────────────────────────
 _TOPO_NW        = 132    # node width px
 _TOPO_NH        = 46     # node height px  (internet / default)
@@ -48,10 +50,14 @@ def _mx_wan_lines(serial: str, uplink_statuses: List) -> List[str]:
     """Return display strings for each WAN interface on an MX (public IP + status)."""
     lines = []
     for entry in (uplink_statuses if isinstance(uplink_statuses, list) else []):
+        if not isinstance(entry, dict):
+            continue
         if entry.get("serial") != serial:
             continue
         for ul in entry.get("uplinks", []):
-            iface = ul.get("interface", "").upper()
+            if not isinstance(ul, dict):
+                continue
+            iface = str(ul.get("interface", "")).upper()
             pub = ul.get("publicIp") or ul.get("ip") or ""
             status = ul.get("status", "")
             suffix = "" if status == "active" else f" ({status})"
@@ -65,9 +71,13 @@ def _mx_peak_gbps(network_id: str, uplinks_usage: Any) -> Dict[str, float]:
     entries = uplinks_usage.get(network_id, []) if isinstance(uplinks_usage, dict) else []
     peak: Dict[str, float] = {}
     for entry in (entries if isinstance(entries, list) else []):
+        if not isinstance(entry, dict):
+            continue
         for iface in entry.get("byInterface", []):
-            name = (iface.get("interface") or "").lower()
-            gb = (iface.get("sent", 0) + iface.get("received", 0)) / 1e9
+            if not isinstance(iface, dict):
+                continue
+            name = str(iface.get("interface") or "").lower()
+            gb = (safe_float(iface.get("sent")) + safe_float(iface.get("received"))) / 1e9
             if gb > peak.get(name, 0.0):
                 peak[name] = gb
     return peak
@@ -117,7 +127,11 @@ def _switch_poe_str(serial: str, port_statuses_by_switch: Dict) -> str:
     """Average PoE draw in watts over the 24h collection window, or ''."""
     ports = port_statuses_by_switch.get(serial, {})
     port_list = ports if isinstance(ports, list) else list(ports.values()) if isinstance(ports, dict) else []
-    total_wh = sum(p.get("powerUsageInWh", 0) for p in port_list if isinstance(p, dict))
+    total_wh = sum(
+        safe_float(p.get("powerUsageInWh"))
+        for p in port_list
+        if isinstance(p, dict)
+    )
     avg_w = total_wh / 24.0
     return f"{avg_w:.0f}W PoE" if avg_w >= 1 else ""
 
@@ -671,7 +685,7 @@ def _topo_svg(
         dot_c = _TOPO_DOT.get(status, "#94a3b8")
         has_issue = bool(port_issues.get(serial))
         if ntype_s == "wireless":
-            util = float((ap_util.get(serial) or {}).get("utilizationTotal", 0))
+            util = safe_float((ap_util.get(serial) or {}).get("utilizationTotal"))
             has_issue = has_issue or util > 70
         border = "#f87171" if has_issue else C["bd"]
         border_w = "2" if has_issue else "1.2"
@@ -882,4 +896,3 @@ def _build_topology_facts(
                 edge_counts[local_serial] = edge_counts.get(local_serial, 0) + 1
 
     return serial_to_dev, status_by_switch, parent_of, children_of, edge_counts
-

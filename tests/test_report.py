@@ -1,5 +1,7 @@
 """Tests for reporting/app.py — build_org_report() with fixture data."""
+import json
 import os
+import shutil
 import sys
 import pytest
 
@@ -82,6 +84,46 @@ class TestBuildOrgReport:
     def test_wpc_topology_excluded(self, report_html):
         """Topology section should still exist even with empty LLDP fixture."""
         assert "topology" in report_html
+
+    def test_malformed_artifacts_degrade_with_data_quality_notice(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "devices_availabilities.json").write_text("{invalid json}")
+        (org_dir / "channel_utilization_by_device.json").write_text(
+            json.dumps([{"serial": "AP-BAD", "utilizationTotal": "not-a-number"}])
+        )
+        (org_dir / "networks.json").write_text(json.dumps({"wrong": "top-level"}))
+
+        html = build_org_report(str(org_dir), "Degraded Org")
+
+        assert "data-quality-banner" in html
+        assert "devices_availabilities.json" in html
+        assert "non-numeric utilizationTotal" in html
+        assert "Traceback" not in html
+
+    def test_mixed_timezone_timestamps_do_not_abort_rendering(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "firmware_upgrades.json").write_text(json.dumps([
+            {"time": "2026-09-25T12:00:00Z", "network": {"name": "Main"}, "status": "completed"},
+            {"time": "2026-09-25T08:00:00-04:00", "network": {"name": "Main"}, "status": "completed"},
+        ]))
+        (org_dir / "alerts_history.json").write_text(json.dumps({
+            "N_test_001": [
+                {"occurredAt": "2026-09-25T12:00:00Z", "alertType": "test"},
+                {"occurredAt": "2026-09-25T08:00:00", "alertType": "test"},
+            ]
+        }))
+
+        html = build_org_report(str(org_dir), "Timestamp Org")
+
+        assert "Recent Firmware Upgrades" in html
+        assert "Most Recent Alerts" in html
+        assert "TypeError" not in html
 
     def test_exec_summary_report_variant(self):
         from reporting.app import build_org_report

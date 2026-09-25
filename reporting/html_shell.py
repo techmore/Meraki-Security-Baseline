@@ -817,6 +817,15 @@ def build_html(doc_title: str, body: str) -> str:
       font-size: 12px;
       margin: 0 0 16px;
     }}
+    .data-quality-banner {{
+      background: #fff1f2;
+      border-left: 4px solid #e11d48;
+      color: #881337;
+      padding: 10px 16px;
+      font-size: 12px;
+      margin: 0 0 16px;
+    }}
+    .data-quality-banner ul {{ margin: 6px 0 0 18px; padding: 0; }}
     @media print {{ .schema-warning-banner {{ display: none; }} }}
 
     /* =====================================================
