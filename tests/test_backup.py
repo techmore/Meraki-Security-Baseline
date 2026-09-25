@@ -192,6 +192,34 @@ class TestPagedGetRateLimit:
 
 
 class TestSharedMerakiClient:
+    def test_environment_settings_load_after_dotenv(self, monkeypatch, tmp_path):
+        from meraki_env import load_env
+
+        for name in ("MERAKI_API_BASE", "MERAKI_REQUEST_TIMEOUT", "MERAKI_MAX_RETRIES"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(mc, "_CONFIG", None)
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "MERAKI_API_BASE=https://meraki.test/api/v1\n"
+            "MERAKI_REQUEST_TIMEOUT=11\n"
+            "MERAKI_MAX_RETRIES=2\n",
+            encoding="utf-8",
+        )
+
+        load_env(str(env_path))
+        config = mc.configure_from_env()
+
+        assert config.api_base == "https://meraki.test/api/v1"
+        assert config.request_timeout == 11
+        assert config.max_retries == 2
+        assert mc.build_url("/organizations") == "https://meraki.test/api/v1/organizations"
+
+        # load_env() intentionally writes into os.environ; clean these values
+        # so later tests continue to exercise default configuration.
+        for name in ("MERAKI_API_BASE", "MERAKI_REQUEST_TIMEOUT", "MERAKI_MAX_RETRIES"):
+            os.environ.pop(name, None)
+        mc._CONFIG = None
+
     def test_build_url_appends_query_params(self):
         url = mc.build_url("/organizations", {"perPage": 5, "foo": "bar"})
         assert url.startswith("https://api.meraki.com/api/v1/organizations?")

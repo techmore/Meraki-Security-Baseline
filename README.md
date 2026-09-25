@@ -22,6 +22,11 @@ A reporting pipeline that collects Meraki org data, generates network health and
 ./run.sh
 ```
 
+Optional API client settings are also supported: `MERAKI_API_BASE`,
+`MERAKI_REQUEST_TIMEOUT`, and `MERAKI_MAX_RETRIES`. Values already exported in
+the shell take precedence over `.env`; the backup process loads these settings
+before creating its shared API client configuration.
+
 Optional — specify a local Ollama model for AI-enhanced recommendations:
 
 ```bash

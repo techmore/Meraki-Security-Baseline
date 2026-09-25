@@ -14,13 +14,16 @@ from typing import Dict, Any, List, Optional, Tuple
 log = logging.getLogger(__name__)
 
 from meraki_env import load_env
-from meraki_client import MerakiRequestError, get_json as _client_get_json, get_one as _client_get_one, paged_get as _client_paged_get
+from meraki_client import (
+    MerakiRequestError,
+    configure_from_env,
+    get_json as _client_get_json,
+    get_one as _client_get_one,
+    paged_get as _client_paged_get,
+)
 
-API_BASE          = os.getenv("MERAKI_API_BASE", "https://api.meraki.com/api/v1")
 BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
 BACKUPS_DIR       = os.path.join(BASE_DIR, "backups")
-_REQUEST_TIMEOUT  = int(os.getenv("MERAKI_REQUEST_TIMEOUT", "30"))   # seconds per call
-_MAX_RETRIES      = int(os.getenv("MERAKI_MAX_RETRIES",     "5"))    # 429 retries
 
 # ── Schema versioning ────────────────────────────────────────────────────────
 # Increment when backup file shapes change (new keys, renamed files, type changes).
@@ -80,7 +83,7 @@ def log_line(log_f: TextIO, level: str, message: str) -> None:
 
 
 def _get_json(url: str, api_key: str) -> Dict[str, Any]:
-    return _client_get_json(url, api_key, timeout=_REQUEST_TIMEOUT)
+    return _client_get_json(url, api_key)
 
 
 def paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:
@@ -89,7 +92,6 @@ def paged_get(path: str, api_key: str, params: Optional[Dict[str, Any]] = None) 
         api_key,
         params=params,
         per_page_default=PER_PAGE_DEFAULT,
-        max_retries=_MAX_RETRIES,
         courtesy_delay=0.2,
     )
 
@@ -1028,6 +1030,7 @@ def main() -> int:
     max_age_h = args.cache_age
 
     load_env()
+    configure_from_env()
     api_key = os.getenv("MERAKI_API_KEY")
     if not api_key:
         print("Missing MERAKI_API_KEY env var.", file=sys.stderr)
