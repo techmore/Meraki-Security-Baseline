@@ -54,8 +54,20 @@ class TestBuildOrgReport:
         assert "Collection Gaps" in report_html
         assert "Administrator inventory" in report_html
 
+    def test_full_toc_includes_unifi_section(self, report_html):
+        assert "<span class=\"toc-num\">17</span>" in report_html
+        assert "UniFi Comparison &amp; Refresh Planning" in report_html
+
     def test_traffic_flows_present(self, report_html):
         assert "traffic-flows" in report_html
+
+    def test_backup_toc_includes_unifi_section(self):
+        from reporting.app import build_org_report
+
+        html = build_org_report(FIXTURES, "Test Org", report_kind="backup")
+
+        assert "<span class=\"toc-num\">16</span>" in html
+        assert "UniFi Comparison &amp; Refresh Planning" in html
 
     def test_licensing_section_present(self, report_html):
         assert "licensing" in report_html

@@ -876,6 +876,10 @@ def build_org_report(
             {toc_switch_subitems}
           </ol>
         </li>
+        <li>
+          <span class="toc-num">17</span>
+          <span class="toc-entry">UniFi Comparison &amp; Refresh Planning</span>
+        </li>
       </ol>
     </section>
     """
@@ -949,6 +953,10 @@ def build_org_report(
           <ol class="toc-sub">
             {toc_switch_subitems}
           </ol>
+        </li>
+        <li>
+          <span class="toc-num">16</span>
+          <span class="toc-entry">UniFi Comparison &amp; Refresh Planning</span>
         </li>
       </ol>
     </section>
