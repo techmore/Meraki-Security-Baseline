@@ -1,6 +1,6 @@
 import re
 from collections import deque
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .common import safe_float
 
@@ -42,6 +42,95 @@ def _svg_esc(s: str) -> str:
 def _card_h(ntype: str) -> int:
     """Return card height in px for a given device type."""
     return {"appliance": _TOPO_NH_MX, "switch": _TOPO_NH_SW}.get(ntype, _TOPO_NH)
+
+
+def _build_ap_to_switch_map(
+    devices: List[Dict[str, Any]],
+    lldp_cdp: Any,
+    data_quality_warnings: Optional[List[str]] = None,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[str]]]:
+    """Build confirmed AP-to-switch relationships from the LLDP/CDP artifact.
+
+    LLDP/CDP neighbor records are stored separately from switch port-status
+    records. Restricting candidate identifiers to known wireless devices keeps
+    this mapping independent of vendor-specific neighbor descriptions while
+    avoiding false AP matches for other endpoint types.
+    """
+    ap_identifier_to_serial: Dict[str, str] = {}
+    for device in devices if isinstance(devices, list) else []:
+        if not isinstance(device, dict):
+            continue
+        if str(device.get("productType") or "").lower() != "wireless":
+            continue
+        serial = str(device.get("serial") or "").strip()
+        if not serial:
+            continue
+        for identifier in (serial, device.get("mac")):
+            normalized = "".join(
+                char for char in str(identifier or "").lower() if char.isalnum()
+            )
+            if normalized:
+                ap_identifier_to_serial[normalized] = serial
+
+    ap_to_switch: Dict[str, Dict[str, Any]] = {}
+    switch_to_aps: Dict[str, List[str]] = {}
+    if not isinstance(lldp_cdp, dict):
+        return ap_to_switch, switch_to_aps
+
+    for switch_serial, switch_data in lldp_cdp.items():
+        if not isinstance(switch_data, dict):
+            continue
+        ports = switch_data.get("ports", {})
+        if not isinstance(ports, dict):
+            if data_quality_warnings is not None:
+                data_quality_warnings.append(
+                    "lldp_cdp.json contains a non-object ports field"
+                )
+            continue
+
+        for port_id, port_data in ports.items():
+            if not isinstance(port_data, dict):
+                continue
+
+            neighbor_details = []
+            for neighbor_type in ("lldp", "cdp"):
+                details = port_data.get(neighbor_type)
+                if isinstance(details, dict):
+                    neighbor_details.append(details)
+
+            identifiers = []
+            for details in neighbor_details:
+                identifiers.extend(
+                    details.get(field)
+                    for field in ("chassisId", "deviceId")
+                    if details.get(field)
+                )
+            if port_data.get("deviceMac"):
+                identifiers.append(port_data["deviceMac"])
+
+            ap_serial = None
+            for identifier in identifiers:
+                normalized = "".join(
+                    char for char in str(identifier or "").lower() if char.isalnum()
+                )
+                ap_serial = ap_identifier_to_serial.get(normalized)
+                if ap_serial:
+                    break
+            if not ap_serial or ap_serial in ap_to_switch:
+                continue
+
+            lldp = port_data.get("lldp")
+            cdp = port_data.get("cdp")
+            lldp = lldp if isinstance(lldp, dict) else {}
+            cdp = cdp if isinstance(cdp, dict) else {}
+            ap_to_switch[ap_serial] = {
+                "switch": str(switch_serial),
+                "port": str(port_id),
+                "name": lldp.get("systemName") or cdp.get("deviceId") or "",
+            }
+            switch_to_aps.setdefault(str(switch_serial), []).append(ap_serial)
+
+    return ap_to_switch, switch_to_aps
 
 
 # ── Enrichment helpers ────────────────────────────────────────────────────────

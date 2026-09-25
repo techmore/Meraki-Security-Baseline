@@ -84,6 +84,53 @@ class TestBuildOrgReport:
         assert "<img src=x" not in html
         assert "&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
+    def test_ap_interference_groups_by_lldp_switch_and_port(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "lldp_cdp.json").write_text(json.dumps({
+            "Q2SW-TEST-0001": {
+                "ports": {
+                    "7": {
+                        "lldp": {
+                            "systemDescription": "Meraki MR46 Cloud Managed AP",
+                            "chassisId": "aa:bb:cc:00:00:05",
+                            "systemName": "AP-1F-01",
+                            "portId": "0",
+                        },
+                        "cdp": {
+                            "platform": "Meraki MR46 Cloud Managed AP",
+                            "deviceId": "aabbcc000005",
+                            "portId": "Port 0",
+                        },
+                    }
+                }
+            }
+        }))
+        (org_dir / "channel_utilization_by_device.json").write_text(json.dumps([
+            {
+                "serial": "Q2AP-TEST-0001",
+                "network": {"id": "N_test_001"},
+                "utilizationTotal": 65,
+                "byBand": [
+                    {
+                        "band": "5",
+                        "wifi": {"percentage": 45},
+                        "nonWifi": {"percentage": 12},
+                        "total": {"percentage": 65},
+                    }
+                ],
+            }
+        ]))
+
+        html = build_org_report(str(org_dir), "LLDP AP Org")
+
+        assert "AP Deep Dive By Switch" in html
+        assert "Q2SW-TEST-0001" in html
+        assert ">7</td>" in html
+        assert "AP-1F-01" in html
+
     def test_security_fail_check_rendered(self, report_html):
         """The fixture has 1 failing IPS check — it should appear in report."""
         assert "Intrusion Prevention" in report_html

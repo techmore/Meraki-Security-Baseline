@@ -318,7 +318,7 @@ def _build_ap_interference_section(
     devices_by_network: Dict[str, Dict[str, Any]],
     channel_util: Any,
     wireless_stats: Dict[str, Any],
-    switch_port_statuses_by_switch: Dict[str, Any],
+    ap_to_switch: Dict[str, Dict[str, Any]],
 ) -> str:
     if not isinstance(channel_util, list):
         return """
@@ -470,34 +470,24 @@ def _build_ap_interference_section(
         </div>
       </div>
         """
-        )
+    )
 
     hot_aps = sorted(
         per_ap_rows,
         key=lambda item: (-item["worst_non_wifi"], -item["worst_total"], item["site"], item["name"]),
     )
     switch_ap_links: Dict[str, List[Dict[str, Any]]] = {}
-    for switch_serial, ports in switch_port_statuses_by_switch.items() if isinstance(switch_port_statuses_by_switch, dict) else []:
-        if not isinstance(ports, list):
+    for ap in hot_aps:
+        link = ap_to_switch.get(ap["serial"]) if isinstance(ap_to_switch, dict) else None
+        if not isinstance(link, dict) or not link.get("switch"):
             continue
-        for port in ports:
-            if not isinstance(port, dict):
-                continue
-            for key in ("lldp", "cdp"):
-                disc = port.get(key)
-                if not isinstance(disc, dict):
-                    continue
-                neighbor_id = str(disc.get("chassisId") or disc.get("deviceId") or "").lower()
-                for ap in hot_aps:
-                    ap_mac = str(ap_by_serial.get(ap["serial"], {}).get("mac") or "").lower().replace(":", "")
-                    if ap_mac and ap_mac in neighbor_id.replace(":", ""):
-                        switch_ap_links.setdefault(switch_serial, []).append(
-                            {
-                                "switch_port": str(port.get("portId") or "?"),
-                                "ap": ap,
-                            }
-                        )
-                        break
+        switch_serial = str(link["switch"])
+        switch_ap_links.setdefault(switch_serial, []).append(
+            {
+                "switch_port": str(link.get("port") or "?"),
+                "ap": ap,
+            }
+        )
     ap_deep_dive_parts = []
     for switch_serial, linked in sorted(switch_ap_links.items(), key=lambda item: len(item[1]), reverse=True):
         linked_sorted = sorted(

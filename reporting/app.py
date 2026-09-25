@@ -26,7 +26,12 @@ from .common import (
     safe_float,
     safe_int,
 )
-from .topology import _topo_pages, _topo_summary_rows, _topo_svg
+from .topology import (
+    _build_ap_to_switch_map,
+    _topo_pages,
+    _topo_summary_rows,
+    _topo_svg,
+)
 from .sections import (
     _build_ap_interference_section,
     _build_budget_forecast_section,
@@ -250,52 +255,14 @@ def build_org_report(
         moderate_util_devices = []
         ap_util_by_serial = {}
 
-    # Build AP-to-switch mapping from LLDP/CDP data
-    # lldp_cdp: {switch_serial: {ports: {port_id: {lldp/cdp: {...}}}}}
-    _mac_to_serial: Dict[str, str] = {
-        str(d.get("mac", "")).lower().replace(":", ""): d.get("serial", "")
-        for d in devices_avail
-        if isinstance(d, dict) and d.get("mac") and d.get("serial")
-    }
-    ap_to_switch: Dict[str, Dict] = {}   # ap_serial -> {switch, port}
-    switch_to_aps: Dict[str, list] = {}  # switch_serial -> [ap_serial, ...]
-    if isinstance(lldp_cdp, dict):
-        for sw_serial, sw_lldp in lldp_cdp.items():
-            if not isinstance(sw_lldp, dict):
-                continue
-            _lldp_ports = sw_lldp.get("ports", {})
-            if not isinstance(_lldp_ports, dict):
-                _data_quality_warnings.append("lldp_cdp.json contains a non-object ports field")
-                continue
-            for port_id, port_data in _lldp_ports.items():
-                if not isinstance(port_data, dict):
-                    continue
-                _lldp = port_data.get("lldp") or {}
-                _cdp  = port_data.get("cdp")  or {}
-                if not isinstance(_lldp, dict):
-                    _lldp = {}
-                if not isinstance(_cdp, dict):
-                    _cdp = {}
-                _desc = str(
-                    _lldp.get("systemDescription")
-                    or _cdp.get("platform")
-                    or ""
-                ).lower()
-                if "mr" not in _desc and "access point" not in _desc:
-                    continue
-                _mac = str(
-                    _lldp.get("chassisId")
-                    or port_data.get("deviceMac", "")
-                    or ""
-                ).lower().replace(":", "").replace("-", "")
-                _ap_serial = _mac_to_serial.get(_mac)
-                if _ap_serial:
-                    ap_to_switch[_ap_serial] = {
-                        "switch": sw_serial,
-                        "port": port_id,
-                        "name": _lldp.get("systemName") or _cdp.get("deviceId") or "",
-                    }
-                    switch_to_aps.setdefault(sw_serial, []).append(_ap_serial)
+    # LLDP/CDP and switch-port status are separate backup artifacts. Keep the
+    # AP relationship mapping canonical so topology, diagnostics, and RF
+    # reporting use the same confirmed switch/port facts.
+    ap_to_switch, switch_to_aps = _build_ap_to_switch_map(
+        devices_avail,
+        lldp_cdp,
+        _data_quality_warnings,
+    )
 
     # Flatten wireless_stats to ap_serial -> connectionStats
     # wireless_stats: {net_id: [{serial, connectionStats}]}
@@ -707,7 +674,7 @@ def build_org_report(
         devices_by_network,
         channel_util,
         wireless_stats,
-        switch_port_statuses_by_switch,
+        ap_to_switch,
     )
     config_coverage_html = _build_config_coverage_section(org_dir, networks)
     budget_forecast_html = _build_budget_forecast_section(inventory_summary, pricing_payload)
