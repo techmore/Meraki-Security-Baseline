@@ -50,6 +50,21 @@ def test_missing_telemetry_is_explicitly_not_evaluated():
     assert governance_check["coverage"] == "not_collected"
 
 
+def test_empty_collected_telemetry_is_partial_not_uncollected():
+    checks = _base_checks(
+        artifact_available={
+            "channel_utilization_by_device.json": True,
+            "wireless_rf_profiles.json": True,
+        },
+    )
+
+    channel_check = _check(checks, "wireless.channel_utilization")
+    rf_check = _check(checks, "wireless.rf_profile_baseline")
+
+    assert channel_check["coverage"] == "partial"
+    assert rf_check["coverage"] == "partial"
+
+
 def test_security_statuses_are_normalized_and_failures_preserved():
     checks = _base_checks(
         security_checks=[{"check": "IPS", "status": "Fail"}],

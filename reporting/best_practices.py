@@ -81,7 +81,7 @@ def _channel_utilization_check(
             if has_artifact
             else "Channel-utilization telemetry was not collected for this report."
         )
-        coverage = "partial" if wireless_device_count and has_artifact else "not_collected"
+        coverage = "partial" if has_artifact else "not_collected"
         return _make_check(
             "wireless.channel_utilization",
             "info",
@@ -145,7 +145,7 @@ def _rf_profile_check(
             "RF profile data was not collected or no profiles were available to inspect.",
             "Collect RF profiles and review band steering, minimum bitrates, channel width, and power ranges.",
             "wireless_rf_profiles.json",
-            "partial" if wireless_device_count and has_artifact else "not_collected",
+            "partial" if has_artifact else "not_collected",
         )
 
     findings: List[str] = []
