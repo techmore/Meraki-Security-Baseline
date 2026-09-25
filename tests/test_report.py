@@ -45,6 +45,8 @@ class TestBuildOrgReport:
     def test_security_section_present(self, report_html):
         assert "security-baseline" in report_html
         assert "Security Posture Summary" in report_html
+        assert "Firewall Rules &amp; Internet Exposure" in report_html
+        assert "Not evaluated" in report_html
 
     def test_traffic_flows_present(self, report_html):
         assert "traffic-flows" in report_html
@@ -130,6 +132,84 @@ class TestBuildOrgReport:
         assert "Q2SW-TEST-0001" in html
         assert ">7</td>" in html
         assert "AP-1F-01" in html
+
+    def test_inbound_firewall_rules_render_with_collection_gap_and_risk_flag(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "networks.json").write_text(json.dumps([
+            {
+                "id": "N_test_001",
+                "name": "Main",
+                "productTypes": ["appliance", "switch", "wireless"],
+            },
+            {
+                "id": "N_test_002",
+                "name": "Wireless Only",
+                "productTypes": ["wireless"],
+            },
+        ]))
+        network_dir = org_dir / "networks" / "N_test_001"
+        network_dir.mkdir(parents=True)
+        (network_dir / "appliance_inbound_firewall_rules.json").write_text(json.dumps({
+            "rules": [
+                {
+                    "comment": "HTTPS admin",
+                    "policy": "allow",
+                    "protocol": "tcp",
+                    "srcCidr": "any",
+                    "destCidr": "10.0.0.10/32",
+                    "destPort": "443",
+                },
+                {
+                    "comment": "Deny rest",
+                    "policy": "deny",
+                    "protocol": "any",
+                    "srcCidr": "any",
+                    "destCidr": "10.0.0.0/24",
+                    "destPort": "any",
+                },
+            ]
+        }))
+
+        html = build_org_report(str(org_dir), "Firewall Rules Org")
+
+        assert "Firewall Rules &amp; Internet Exposure" in html
+        assert "HTTPS admin" in html
+        assert "Allow" in html
+        assert "Notable Permissive Rules" in html
+        assert "1 allow rule(s) explicitly permit any source" in html
+        firewall_section = html.split("Firewall Rules &amp; Internet Exposure", 1)[1].split(
+            "</section>", 1
+        )[0]
+        assert "Wireless Only" not in firewall_section
+
+    def test_inbound_firewall_rule_values_are_escaped(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "networks.json").write_text(json.dumps([
+            {"id": "N_test_001", "name": "Main", "productTypes": ["appliance"]}
+        ]))
+        network_dir = org_dir / "networks" / "N_test_001"
+        network_dir.mkdir(parents=True)
+        (network_dir / "appliance_inbound_firewall_rules.json").write_text(json.dumps([
+            {
+                "comment": "</td><script>alert(1)</script>",
+                "policy": "allow",
+                "protocol": "tcp",
+                "srcCidr": "any",
+                "destCidr": "10.0.0.10/32",
+                "destPort": "443",
+            }
+        ]))
+
+        html = build_org_report(str(org_dir), "Firewall XSS Org")
+
+        assert "<script>" not in html
+        assert "&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
     def test_security_fail_check_rendered(self, report_html):
         """The fixture has 1 failing IPS check — it should appear in report."""

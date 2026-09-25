@@ -1381,6 +1381,15 @@ def main() -> int:
                         "Appliance port forwarding unavailable",
                         capability_aware=True,
                     )
+                    _load_or_fetch_net(
+                        "appliance_inbound_firewall_rules.json",
+                        lambda: safe_get_one(
+                            f"/networks/{net_id}/appliance/firewall/inboundFirewallRules",
+                            api_key,
+                        ),
+                        "Appliance inbound firewall rules unavailable",
+                        capability_aware=True,
+                    )
 
                     appliance_baseline[net_id] = net_baseline
 

@@ -37,6 +37,7 @@ from .sections import (
     _build_ap_interference_section,
     _build_budget_forecast_section,
     _build_config_coverage_section,
+    _build_inbound_firewall_rules_section,
     _build_switch_detail_section,
     _build_wan_capacity_section,
 )
@@ -45,6 +46,54 @@ from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
 
 log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_inbound_firewall_rules(
+    org_dir: str,
+    networks: List[Dict[str, Any]],
+    warnings: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Load per-network inbound firewall artifacts with explicit coverage state."""
+    results: Dict[str, Dict[str, Any]] = {}
+    for network in networks:
+        if not isinstance(network, dict) or not network.get("id"):
+            continue
+        network_id = str(network["id"])
+        safe_network_id = re.sub(r"[^\w.\-]+", "_", network_id).strip("._") or "unknown"
+        path = os.path.join(
+            org_dir,
+            "networks",
+            safe_network_id,
+            "appliance_inbound_firewall_rules.json",
+        )
+        if not os.path.exists(path):
+            results[network_id] = {"status": "missing", "rules": []}
+            continue
+        payload = load_json_checked(path, (dict, list), None, warnings)
+        if payload is None:
+            results[network_id] = {"status": "unavailable", "rules": []}
+            continue
+        if isinstance(payload, list):
+            rules = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("rules"), list):
+            rules = payload["rules"]
+        else:
+            warnings.append(
+                "appliance_inbound_firewall_rules.json has no top-level rules list"
+            )
+            results[network_id] = {"status": "invalid", "rules": []}
+            continue
+        invalid_rows = sum(1 for rule in rules if not isinstance(rule, dict))
+        if invalid_rows:
+            warnings.append(
+                f"appliance_inbound_firewall_rules.json contains {invalid_rows} non-object rule row(s)"
+            )
+        results[network_id] = {
+            "status": "complete",
+            "rules": [rule for rule in rules if isinstance(rule, dict)],
+        }
+    return results
+
 
 def build_org_report(
     org_dir: str,
@@ -161,6 +210,11 @@ def build_org_report(
     switch_port_statuses = _flatten_ports(switch_port_statuses_by_switch, "switch_port_statuses.json")
     networks = _load_artifact("networks.json", list, [], required=True)
     security_baseline = _load_artifact("security_baseline.json", dict, {}, required=True)
+    inbound_firewall_rules_by_network = _load_inbound_firewall_rules(
+        org_dir,
+        networks,
+        _data_quality_warnings,
+    )
     network_names = {
         n.get("id"): n.get("name", n.get("id", ""))
         for n in networks
@@ -706,6 +760,10 @@ def build_org_report(
         appliance_uplinks_usage,
         devices_avail,
         networks_by_id,
+    )
+    firewall_rules_html = _build_inbound_firewall_rules_section(
+        networks,
+        inbound_firewall_rules_by_network,
     )
     toc_switch_subitems = "".join(
         f'<li class="toc-sub-item"><a href="#{_he(anchor)}">{_he(label)}</a></li>'
@@ -2241,10 +2299,9 @@ def build_org_report(
           <br><br>
           <strong>Firewall &amp; Internet Exposure:</strong> {_pf_note}
           <br><br>
-          <em>Note: L3 inbound firewall rule detail requires a separate collection step
-          (<code>GET /networks/&#123;id&#125;/appliance/firewall/inboundFirewallRules</code>).
-          That data is not present in this backup set. Add it to the pipeline to surface
-          specific rule-level exposure in future reports.</em>
+          <em>Rule-level inbound policy is shown immediately below when the corresponding
+          network artifact was collected. Missing or unsupported collection is marked
+          <strong>Not evaluated</strong> rather than treated as a pass.</em>
         </div>
       </div>
 
@@ -2261,6 +2318,7 @@ def build_org_report(
       </table>
 
       {render_security_baseline(security_checks)}
+      {firewall_rules_html}
     </section>
     """
 

@@ -592,6 +592,191 @@ def _build_ap_interference_section(
     """
 
 
+def _build_inbound_firewall_rules_section(
+    networks: List[Dict[str, Any]],
+    rules_by_network: Dict[str, Dict[str, Any]],
+) -> str:
+    """Render observed MX inbound firewall policy without overstating risk.
+
+    The Meraki endpoint has returned both a top-level ``rules`` object and a
+    bare list in different backup sets. The report accepts either shape and
+    keeps collection gaps visible instead of turning missing data into a
+    healthy result.
+    """
+
+    def _is_appliance_network(network: Dict[str, Any]) -> bool:
+        product_types = network.get("productTypes")
+        if not isinstance(product_types, list) or not product_types:
+            return True
+        return "appliance" in product_types
+
+    def _raw_value(rule: Dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = rule.get(key)
+            if value is not None and value != "":
+                return value
+        return None
+
+    def _display_value(value: Any, default: str = "—") -> str:
+        if value is None or value == "":
+            return default
+        if isinstance(value, (list, tuple)):
+            values = [str(item) for item in value if item is not None and str(item) != ""]
+            return ", ".join(values) if values else default
+        return str(value)
+
+    def _is_any_source(value: Any) -> bool:
+        if isinstance(value, (list, tuple)):
+            return any(_is_any_source(item) for item in value)
+        normalized = str(value or "").strip().lower()
+        return normalized in {"any", "all", "anywhere", "0.0.0.0/0", "::/0", "0/0"}
+
+    def _policy(value: Any) -> str:
+        normalized = str(value or "unknown").strip().lower()
+        if normalized in {"allow", "permit", "accept"}:
+            return "allow"
+        if normalized in {"deny", "drop", "reject"}:
+            return "deny"
+        return "unknown"
+
+    def _table(headers: List[str], rows: str, empty_message: str = "") -> str:
+        body = rows or f'<tr><td colspan="{len(headers)}">{_he(empty_message)}</td></tr>'
+        header_html = "".join(f"<th>{_he(header)}</th>" for header in headers)
+        return (
+            '<table class="data dense"><thead><tr>'
+            + header_html
+            + f"</tr></thead><tbody>{body}</tbody></table>"
+        )
+
+    appliance_networks = [
+        network
+        for network in networks
+        if isinstance(network, dict) and network.get("id") and _is_appliance_network(network)
+    ]
+    if not appliance_networks:
+        return (
+            '<div class="summary-card"><div class="summary-title">Firewall Rules &amp; Internet Exposure</div>'
+            '<div class="summary-body">Not evaluated: no appliance networks were present in the backup set.</div></div>'
+        )
+
+    coverage_rows = []
+    normalized_rules: List[Dict[str, Any]] = []
+    covered_networks = 0
+    missing_networks = 0
+    for network in sorted(appliance_networks, key=lambda item: str(item.get("name") or item.get("id"))):
+        network_id = str(network["id"])
+        network_name = str(network.get("name") or network_id)
+        detail = rules_by_network.get(network_id) or {}
+        if not isinstance(detail, dict):
+            detail = {}
+        state = str(detail.get("status") or "missing")
+        raw_rules = detail.get("rules")
+        rules = [rule for rule in raw_rules if isinstance(rule, dict)] if isinstance(raw_rules, list) else []
+        if state == "complete":
+            covered_networks += 1
+            state_label = "Collected"
+            rule_count = str(len(rules))
+        else:
+            missing_networks += 1
+            state_label = "Not evaluated"
+            rule_count = "—"
+        coverage_rows.append(
+            "<tr>"
+            f"<td>{_he(network_name)}</td>"
+            f"<td>{_he(state_label)}</td>"
+            f"<td>{_he(rule_count)}</td>"
+            "</tr>"
+        )
+        if state != "complete":
+            continue
+        for rule in rules:
+            policy = _policy(_raw_value(rule, "policy", "action"))
+            source = _raw_value(rule, "srcCidr", "sourceCidr", "srcCidr6")
+            record = {
+                "network": network_name,
+                "policy": policy,
+                "protocol": _display_value(_raw_value(rule, "protocol")),
+                "source": _display_value(source),
+                "destination": _display_value(_raw_value(rule, "destCidr", "destinationCidr", "destCidr6")),
+                "destination_port": _display_value(_raw_value(rule, "destPort", "destinationPort")),
+                "comment": _display_value(_raw_value(rule, "comment", "description", "name")),
+                "allow_any_source": policy == "allow" and _is_any_source(source),
+            }
+            normalized_rules.append(record)
+
+    allow_any_rules = [rule for rule in normalized_rules if rule["allow_any_source"]]
+    deny_rules = [rule for rule in normalized_rules if rule["policy"] == "deny"]
+    summary = (
+        f"{covered_networks}/{len(appliance_networks)} appliance network(s) have a collected "
+        f"inbound rule artifact, with {len(normalized_rules)} explicit rule(s) observed. "
+        f"{len(allow_any_rules)} allow rule(s) explicitly permit any source and "
+        f"{len(deny_rules)} deny rule(s) are configured."
+    )
+    if missing_networks:
+        summary += (
+            f" {missing_networks} network(s) are Not evaluated because the artifact was "
+            "missing, unavailable, or unsupported."
+        )
+
+    def _rule_row(rule: Dict[str, Any]) -> str:
+        policy_class = "check-fail" if rule["allow_any_source"] else (
+            "check-unknown" if rule["policy"] == "unknown" else ""
+        )
+        policy_html = (
+            f'<span class="{policy_class}">{_he(rule["policy"].title())}</span>'
+            if policy_class
+            else _he(rule["policy"].title())
+        )
+        return (
+            "<tr>"
+            f"<td>{_he(rule['network'])}</td>"
+            f"<td>{policy_html}</td>"
+            f"<td>{_he(rule['protocol'])}</td>"
+            f"<td>{_he(rule['source'])}</td>"
+            f"<td>{_he(rule['destination'])}</td>"
+            f"<td>{_he(rule['destination_port'])}</td>"
+            f"<td>{_he(rule['comment'])}</td>"
+            "</tr>"
+        )
+
+    notable_rows = "".join(_rule_row(rule) for rule in allow_any_rules[:50])
+    all_rows = "".join(_rule_row(rule) for rule in normalized_rules[:200])
+    omitted_count = max(0, len(normalized_rules) - 200)
+    omitted_note = (
+        f'<p class="table-note">Showing the first 200 of {len(normalized_rules)} collected rules; '
+        f"{omitted_count} additional rule(s) omitted.</p>"
+        if omitted_count
+        else ""
+    )
+    notable_block = _table(
+        ["Network", "Policy", "Protocol", "Source", "Destination", "Destination Port", "Comment"],
+        notable_rows,
+        "No explicit allow rule with an any-source value was observed in collected artifacts.",
+    )
+    rules_block = _table(
+        ["Network", "Policy", "Protocol", "Source", "Destination", "Destination Port", "Comment"],
+        all_rows,
+        "No explicit inbound rules were returned for the collected networks.",
+    )
+    return f"""
+      <div class="firewall-rules-block">
+        <h3>Firewall Rules &amp; Internet Exposure</h3>
+        <p>{_he(summary)}</p>
+        <div class="summary-card">
+          <div class="summary-title">Observed Policy vs. Interpreted Risk</div>
+          <div class="summary-body">These tables show the rule configuration returned by Meraki. An allow rule with any source is a review flag, not proof that a service is reachable or exploitable. Confirm destination services, NAT behavior, and business justification before remediation.</div>
+        </div>
+        <h4>Collection Coverage</h4>
+        {_table(["Network", "Collection Status", "Rules"], "".join(coverage_rows))}
+        <h4>Notable Permissive Rules</h4>
+        {notable_block}
+        <h4>Configured Inbound Rules</h4>
+        {rules_block}
+        {omitted_note}
+      </div>
+    """
+
+
 def _build_wan_capacity_section(
     uplink_statuses: Any,
     appliance_uplinks_usage: Any,
@@ -779,6 +964,7 @@ def _build_config_coverage_section(
                 net_name,
                 _has("appliance_firewall_settings.json"),
                 _has("appliance_port_forwarding_rules.json"),
+                _has("appliance_inbound_firewall_rules.json"),
                 _has("appliance_intrusion.json"),
                 _has("appliance_malware.json"),
             ]
@@ -789,7 +975,7 @@ def _build_config_coverage_section(
       <h2>11. Configuration Backup Coverage</h2>
       <p>This section documents which configuration artifacts are present in the current backup set. Missing items indicate API collection gaps or inaccessible product scopes that should be added before final audit sign-off.</p>
       {render_section("Org-Wide Configuration Artifacts", [["Artifact", "Status"]] + org_rows if org_rows else [])}
-      {render_section("Per-Network Appliance Configuration", [["Network", "Firewall Settings", "Port Forwarding", "IDS/IPS", "AMP/Malware"]] + network_rows if network_rows else [])}
+      {render_section("Per-Network Appliance Configuration", [["Network", "Firewall Settings", "Port Forwarding", "Inbound Firewall Rules", "IDS/IPS", "AMP/Malware"]] + network_rows if network_rows else [])}
     </section>
     """
 
