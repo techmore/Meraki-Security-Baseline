@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -74,5 +76,13 @@ __pypackages__/
 backups/
 meraki_backup_*/
 meraki_backup_sample_*/
+api_keys_org_ids.txt
+api_keys*.txt
+credentials*.json
+secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
 */report.pdf
 */report.html

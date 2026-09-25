@@ -28,6 +28,22 @@ _MAX_RETRIES      = int(os.getenv("MERAKI_MAX_RETRIES",     "5"))    # 429 retri
 BACKUP_SCHEMA_VERSION = 1
 PIPELINE_VERSION      = "1.2"
 
+# Raw Dashboard payloads can contain credentials or reusable secrets. Keep
+# audit-relevant metadata such as authMode, but never persist secret values.
+_SENSITIVE_FIELD_NAMES = {
+    "access_token",
+    "apikey",
+    "client_secret",
+    "password",
+    "passphrase",
+    "private_key",
+    "psk",
+    "refresh_token",
+    "secret",
+    "shared_secret",
+    "wpa_psk",
+}
+
 # ── Timespan / pagination constants ─────────────────────────────────────────
 TIMESPAN_1H   =   3_600   # seconds
 TIMESPAN_24H  =  86_400   # seconds
@@ -127,8 +143,33 @@ def fetch_licensing_overview(org_id: str, api_key: str) -> Tuple[Any, Optional[s
 
 
 def write_json(path: str, payload: Any) -> None:
+    payload = redact_sensitive_fields(payload)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def redact_sensitive_fields(payload: Any) -> Any:
+    """Remove reusable credential fields from recursively nested API payloads."""
+    if isinstance(payload, dict):
+        clean = {}
+        for key, value in payload.items():
+            normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+            compact = normalized.replace("_", "")
+            if normalized in _SENSITIVE_FIELD_NAMES or compact in {
+                "apikey",
+                "clientsecret",
+                "privatekey",
+                "refreshtoken",
+                "accesstoken",
+                "sharedsecret",
+                "wpapsk",
+            }:
+                continue
+            clean[key] = redact_sensitive_fields(value)
+        return clean
+    if isinstance(payload, list):
+        return [redact_sensitive_fields(item) for item in payload]
+    return payload
 
 
 def _cache_error_path(path: str) -> str:
@@ -213,7 +254,12 @@ def _read_granular_json(org_dir: str, category: str, item_id: str, filename: str
     path = _artifact_path(org_dir, category, item_id, filename)
     if not os.path.exists(path):
         return None
-    return _load_json_file(path)
+    payload = _load_json_file(path)
+    redacted = redact_sensitive_fields(payload)
+    if redacted != payload:
+        # Migrate legacy caches when they are read so the secret is not left on disk.
+        _write_cache_success(path, redacted)
+    return redacted
 
 
 def _granular_cache_fresh(

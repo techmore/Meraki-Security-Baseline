@@ -92,6 +92,22 @@ class TestWriteAndLoad:
         mb.write_json(p, {})
         assert os.path.exists(p)
 
+    def test_write_json_omits_nested_sensitive_fields(self, tmp_path):
+        payload = {
+            "authMode": "psk",
+            "psk": "do-not-persist",
+            "nested": {"password": "also-do-not-persist", "key": "license-key"},
+        }
+        p = str(tmp_path / "redacted.json")
+
+        mb.write_json(p, payload)
+
+        loaded = mb._load_json_file(p)
+        assert loaded == {
+            "authMode": "psk",
+            "nested": {"key": "license-key"},
+        }
+
 
 class TestGranularArtifacts:
     def test_artifact_path_is_namespaced(self, tmp_path):
@@ -107,6 +123,17 @@ class TestGranularArtifacts:
     def test_granular_cache_fresh_uses_underlying_file(self, tmp_path):
         mb._write_granular_json(str(tmp_path), "switches", "SW1", "lldp_cdp.json", {"x": 1})
         assert mb._granular_cache_fresh(str(tmp_path), "switches", "SW1", "lldp_cdp.json", max_age_h=12) is True
+
+    def test_legacy_granular_ssid_cache_is_redacted_on_read(self, tmp_path):
+        path = mb._artifact_path(str(tmp_path), "networks", "N_123", "wireless_ssids.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"name": "Staff", "authMode": "psk", "psk": "legacy-secret"}], f)
+
+        loaded = mb._read_granular_json(str(tmp_path), "networks", "N_123", "wireless_ssids.json")
+
+        assert loaded == [{"name": "Staff", "authMode": "psk"}]
+        assert "legacy-secret" not in open(path, encoding="utf-8").read()
 
 
 # ── Schema version constant ───────────────────────────────────────────────────
