@@ -30,7 +30,6 @@ from .topology import (
     _build_ap_to_switch_map,
     _topo_pages,
     _topo_summary_rows,
-    _topo_svg,
 )
 from .sections import (
     _build_ap_interference_section,
@@ -333,7 +332,7 @@ def build_org_report(
             if not isinstance(port, dict):
                 _data_quality_warnings.append("switch_port_configs.json contains a non-object port row")
                 continue
-            if port.get("enabled") == False and port.get("poeEnabled") == True:
+            if port.get("enabled") is False and port.get("poeEnabled") is True:
                 config_issues.append(
                     {
                         "switch": port.get("switchSerial", "Unknown"),
@@ -1162,6 +1161,11 @@ def build_org_report(
             f"</tr>"
         )
 
+    network_empty_row = (
+        '<tr><td colspan="6" class="empty-state">'
+        "No devices found in this organization's backup. Run a full backup to populate this section."
+        '</td></tr>'
+    )
     network_overview_html = f"""
     <section id="network-overview" class="report-section">
       <h2>2. Network Overview</h2>
@@ -1180,7 +1184,7 @@ def build_org_report(
           </tr>
         </thead>
         <tbody>
-          {"".join(network_overview_rows) if network_overview_rows else '<tr><td colspan="6" class="empty-state">No devices found in this organization\'s backup. Run a full backup to populate this section.</td></tr>'}
+          {"".join(network_overview_rows) if network_overview_rows else network_empty_row}
         </tbody>
       </table>
       <h3>Hardware Inventory by Site</h3>
@@ -1381,7 +1385,7 @@ def build_org_report(
         switches   = [d for d in nd if d.get("productType") == "switch"]
         aps        = [d for d in nd if d.get("productType") == "wireless"]
 
-        sec = f'<div class="building-section">'
+        sec = '<div class="building-section">'
         sec += f"<h3>{_he(net_name)}</h3>"
 
         # ── Path summary bar ───────────────────────────────────────────────

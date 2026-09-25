@@ -9,7 +9,6 @@ Output: <backup_dir>/recommendations_ai_enhanced.md
 import json
 import logging
 import os
-import sys
 import urllib.request
 import urllib.error
 from datetime import datetime

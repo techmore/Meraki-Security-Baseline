@@ -65,6 +65,12 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+For development and CI tooling, install the pinned development set instead:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
 - Python 3.10+
 - WeasyPrint (PDF rendering)
 - `wkhtmltopdf` (optional PDF fallback)
@@ -99,6 +105,18 @@ Run tests:
 ```bash
 pytest -q
 ```
+
+Run the same local quality gates used by CI:
+
+```bash
+ruff check .
+coverage run --source=meraki_backup,meraki_client,meraki_env,merge_recommendations,ollama_review,reporting -m pytest tests/ -q
+coverage report --fail-under=50
+pip-audit -r requirements.txt --progress-spinner off
+```
+
+Runtime dependencies are pinned in `requirements.txt`; Dependabot opens controlled
+weekly update pull requests instead of allowing unreviewed releases into CI.
 
 ## License
 

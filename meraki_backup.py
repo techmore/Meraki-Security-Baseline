@@ -11,16 +11,15 @@ from datetime import datetime, timezone
 from typing import Callable, TextIO
 from typing import Dict, Any, List, Optional, Tuple
 
-log = logging.getLogger(__name__)
-
 from meraki_env import load_env
 from meraki_client import (
-    MerakiRequestError,
     configure_from_env,
     get_json as _client_get_json,
     get_one as _client_get_one,
     paged_get as _client_paged_get,
 )
+
+log = logging.getLogger(__name__)
 
 BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
 BACKUPS_DIR       = os.path.join(BASE_DIR, "backups")
@@ -1149,7 +1148,7 @@ def main() -> int:
                 f"/organizations/{org_id}/uplinks/statuses",
                 "Uplink statuses",
             )
-            devices_statuses = _cached_safe_paged(
+            _devices_statuses = _cached_safe_paged(
                 "devices_statuses.json",
                 f"/organizations/{org_id}/devices/statuses",
                 "Device statuses",

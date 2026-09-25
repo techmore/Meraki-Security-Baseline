@@ -10,8 +10,6 @@ from .common import (
     _he,
     _inline_md,
     _is_sfp_like_port,
-    _model_capability_summary,
-    _hardware_consistency_note,
     _port_group_label,
     _port_heat_label,
     _port_heat_score,
@@ -93,12 +91,13 @@ def _render_switch_port_grid(
         group_kind = "SFP / Module" if label != "Front Panel" else "Front Panel"
         row_one = "".join(cells[:midpoint])
         row_two = "".join(cells[midpoint:])
+        row_two_html = f'<div class="switch-port-row">{row_two}</div>' if row_two else ""
         groups_html.append(
             f'<div class="switch-port-group">'
             f'<div class="switch-port-group-title">{_he(label)} <span class="switch-port-group-kind">{_he(group_kind)}</span></div>'
             f'<div class="switch-port-face">'
             f'<div class="switch-port-row">{row_one}</div>'
-            f'{f"<div class=\"switch-port-row\">{row_two}</div>" if row_two else ""}'
+            f'{row_two_html}'
             f"</div></div>"
         )
     return summary + "".join(groups_html)
@@ -159,7 +158,6 @@ def _build_switch_detail_section(
     ]
 
     for site_name, serial, switch_name, model in switch_entries:
-        switch = serial_to_dev.get(serial, {})
         ports = sorted(
             status_by_switch.get(serial, {}).values(),
             key=lambda item: (
@@ -305,7 +303,7 @@ def _build_switch_detail_section(
             <th>Total Data</th><th>Current Throughput</th><th>Power</th><th>Indicators</th><th>Connected Device</th>
           </tr>
         </thead>
-        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan=\"13\">No switch port status data available.</td></tr>'}</tbody>
+        <tbody>{''.join(table_rows) if table_rows else '<tr><td colspan="13">No switch port status data available.</td></tr>'}</tbody>
       </table>
     </section>
     """
@@ -368,7 +366,6 @@ def _build_ap_interference_section(
         worst = max(stats, key=lambda item: (item["non_wifi"], item["total"], item["wifi"]))
         avg_total = sum(item["total"] for item in stats) / len(stats)
         avg_non_wifi = sum(item["non_wifi"] for item in stats) / len(stats)
-        avg_wifi = sum(item["wifi"] for item in stats) / len(stats)
         conn = None
         for item in wireless_stats.get(net_id, []) if isinstance(wireless_stats, dict) else []:
             if isinstance(item, dict) and item.get("serial") == serial:

@@ -6,8 +6,6 @@ from html import escape as _he
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
-from .common import REPORT_VERSION
-
 log = logging.getLogger(__name__)
 
 

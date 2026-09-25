@@ -1,11 +1,11 @@
 # Core Meraki SDK
-meraki>=1.45.0
+meraki==4.5.0
 
 # PDF generation (pure Python, no external binary needed)
-weasyprint>=60.0
+weasyprint==70.0
 
 # Report formatting
-prettytable>=3.9.0
+prettytable==3.18.0
 
 # ── Optional / external ───────────────────────────────────────────────────────
 # PDF fallback (install separately if WeasyPrint is unavailable):

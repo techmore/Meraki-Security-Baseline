@@ -247,7 +247,9 @@ class TestLicensingCounts:
     """Test that licensing expired/active counts use the bool expired field."""
 
     def test_expired_bool_counted(self):
-        import json, tempfile, os
+        import json
+        import os
+        import tempfile
         from reporting.app import build_org_report
         # Create a temp dir with just enough to not crash
         with tempfile.TemporaryDirectory() as tmp:

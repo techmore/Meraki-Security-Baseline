@@ -1,0 +1,7 @@
+# Reproducible runtime dependencies plus the tools used by CI and local development.
+-r requirements.txt
+
+pytest==9.1.1
+coverage==7.16.1
+ruff==0.16.9
+pip-audit==2.10.1
