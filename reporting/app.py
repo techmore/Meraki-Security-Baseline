@@ -36,6 +36,7 @@ from .topology import (
 from .sections import (
     _build_ap_interference_section,
     _build_budget_forecast_section,
+    _build_client_analysis_section,
     _build_config_coverage_section,
     _build_inbound_firewall_rules_section,
     _build_switch_detail_section,
@@ -2471,93 +2472,9 @@ def _build_org_report_variants(
     """
 
     # =========================================================
-    # SECTION 10: CLIENT ANALYSIS
+    # SECTION 15: CLIENT ANALYSIS
     # =========================================================
-    ssid_counts: Dict[str, int] = {}
-    os_counts: Dict[str, int] = {}
-    vlan_counts: Dict[str, int] = {}
-    auth_counts: Dict[str, int] = {}
-    rssi_buckets = {"Excellent (>-60)": 0, "Good (-60 to -70)": 0,
-                    "Fair (-70 to -80)": 0, "Poor (<-80)": 0}
-
-    for cl in wireless_clients:
-        ssid = cl.get("ssid") or "Unknown"
-        ssid_counts[ssid] = ssid_counts.get(ssid, 0) + 1
-
-        os_raw = cl.get("os") or cl.get("deviceTypePrediction") or "Unknown"
-        os_counts[os_raw] = os_counts.get(os_raw, 0) + 1
-
-        vlan = str(cl.get("vlan") or cl.get("vlanId") or "—")
-        vlan_counts[vlan] = vlan_counts.get(vlan, 0) + 1
-
-        auth = cl.get("status") or cl.get("authType") or "Unknown"
-        auth_counts[auth] = auth_counts.get(auth, 0) + 1
-
-        rssi = cl.get("rssi")
-        if rssi is not None:
-            try:
-                rssi_val = int(rssi)
-                if rssi_val > -60:
-                    rssi_buckets["Excellent (>-60)"] += 1
-                elif rssi_val >= -70:
-                    rssi_buckets["Good (-60 to -70)"] += 1
-                elif rssi_val >= -80:
-                    rssi_buckets["Fair (-70 to -80)"] += 1
-                else:
-                    rssi_buckets["Poor (<-80)"] += 1
-            except (ValueError, TypeError):
-                pass
-
-    def _top_rows(d: Dict[str, int], limit: int = 10) -> str:
-        rows = sorted(d.items(), key=lambda x: x[1], reverse=True)[:limit]
-        return "".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in rows)
-
-    rssi_rows = "".join(
-        f"<tr><td>{bucket}</td><td>{cnt}</td></tr>"
-        for bucket, cnt in rssi_buckets.items()
-    )
-
-    if wireless_clients:
-        client_tables = f"""
-        <h3>Clients by SSID</h3>
-        <table class="data">
-          <thead><tr><th>SSID</th><th>Client Count</th></tr></thead>
-          <tbody>{_top_rows(ssid_counts)}</tbody>
-        </table>
-
-        <h3>Clients by OS / Device Type</h3>
-        <table class="data">
-          <thead><tr><th>OS / Device Type</th><th>Client Count</th></tr></thead>
-          <tbody>{_top_rows(os_counts)}</tbody>
-        </table>
-
-        <h3>Clients by VLAN</h3>
-        <table class="data">
-          <thead><tr><th>VLAN</th><th>Client Count</th></tr></thead>
-          <tbody>{_top_rows(vlan_counts)}</tbody>
-        </table>
-
-        <h3>Signal Strength Distribution</h3>
-        <table class="data">
-          <thead><tr><th>RSSI Range</th><th>Client Count</th></tr></thead>
-          <tbody>{rssi_rows}</tbody>
-        </table>
-        """
-    else:
-        client_tables = """
-        <div class="summary-card">
-          <div class="summary-body">No wireless client data available in this backup.</div>
-        </div>"""
-
-    client_analysis_html = f"""
-    <section id="client-analysis" class="report-section">
-      <h2>15. Client Analysis</h2>
-      <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
-         in this backup. Wired client detail requires switch port client data which is not
-         collected in the current pipeline.</p>
-      {client_tables}
-    </section>
-    """
+    client_analysis_html = _build_client_analysis_section(wireless_clients)
 
     # =========================================================
     # SECTION 17: UNIFI COMPARISON & REFRESH PLANNING

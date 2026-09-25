@@ -103,6 +103,99 @@ def _render_switch_port_grid(
     return summary + "".join(groups_html)
 
 
+def _build_client_analysis_section(wireless_clients: List[Dict[str, Any]]) -> str:
+    """Render wireless-client distributions from normalized client records."""
+    ssid_counts: Dict[str, int] = {}
+    os_counts: Dict[str, int] = {}
+    vlan_counts: Dict[str, int] = {}
+    rssi_buckets = {
+        "Excellent (>-60)": 0,
+        "Good (-60 to -70)": 0,
+        "Fair (-70 to -80)": 0,
+        "Poor (<-80)": 0,
+    }
+
+    for client in wireless_clients:
+        ssid = str(client.get("ssid") or "Unknown")
+        ssid_counts[ssid] = ssid_counts.get(ssid, 0) + 1
+
+        client_os = str(
+            client.get("os") or client.get("deviceTypePrediction") or "Unknown"
+        )
+        os_counts[client_os] = os_counts.get(client_os, 0) + 1
+
+        vlan = str(client.get("vlan") or client.get("vlanId") or "—")
+        vlan_counts[vlan] = vlan_counts.get(vlan, 0) + 1
+
+        rssi = client.get("rssi")
+        if rssi is not None:
+            try:
+                rssi_value = int(rssi)
+                if rssi_value > -60:
+                    rssi_buckets["Excellent (>-60)"] += 1
+                elif rssi_value >= -70:
+                    rssi_buckets["Good (-60 to -70)"] += 1
+                elif rssi_value >= -80:
+                    rssi_buckets["Fair (-70 to -80)"] += 1
+                else:
+                    rssi_buckets["Poor (<-80)"] += 1
+            except (ValueError, TypeError):
+                pass
+
+    def top_rows(values: Dict[str, int], limit: int = 10) -> str:
+        rows = sorted(values.items(), key=lambda item: item[1], reverse=True)[:limit]
+        return "".join(
+            f"<tr><td>{_he(label)}</td><td>{count}</td></tr>"
+            for label, count in rows
+        )
+
+    rssi_rows = "".join(
+        f"<tr><td>{_he(bucket)}</td><td>{count}</td></tr>"
+        for bucket, count in rssi_buckets.items()
+    )
+    if wireless_clients:
+        client_tables = f"""
+        <h3>Clients by SSID</h3>
+        <table class="data">
+          <thead><tr><th>SSID</th><th>Client Count</th></tr></thead>
+          <tbody>{top_rows(ssid_counts)}</tbody>
+        </table>
+
+        <h3>Clients by OS / Device Type</h3>
+        <table class="data">
+          <thead><tr><th>OS / Device Type</th><th>Client Count</th></tr></thead>
+          <tbody>{top_rows(os_counts)}</tbody>
+        </table>
+
+        <h3>Clients by VLAN</h3>
+        <table class="data">
+          <thead><tr><th>VLAN</th><th>Client Count</th></tr></thead>
+          <tbody>{top_rows(vlan_counts)}</tbody>
+        </table>
+
+        <h3>Signal Strength Distribution</h3>
+        <table class="data">
+          <thead><tr><th>RSSI Range</th><th>Client Count</th></tr></thead>
+          <tbody>{rssi_rows}</tbody>
+        </table>
+        """
+    else:
+        client_tables = """
+        <div class="summary-card">
+          <div class="summary-body">No wireless client data available in this backup.</div>
+        </div>"""
+
+    return f"""
+    <section id="client-analysis" class="report-section">
+      <h2>15. Client Analysis</h2>
+      <p>Analysis of <strong>{len(wireless_clients)}</strong> wireless client record(s) captured
+         in this backup. Wired client detail requires switch port client data which is not
+         collected in the current pipeline.</p>
+      {client_tables}
+    </section>
+    """
+
+
 def _build_switch_detail_section(
     devices_by_network: Dict[str, Dict[str, Any]],
     lldp_cdp: Dict[str, Any],
