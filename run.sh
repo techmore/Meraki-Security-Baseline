@@ -114,7 +114,12 @@ NO_QUERY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model|-m)
-      CUSTOM_MODEL="${2:-}"
+      if [[ $# -lt 2 || -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+        echo "Option $1 requires a model value." >&2
+        usage >&2
+        exit 2
+      fi
+      CUSTOM_MODEL="$2"
       shift 2
       ;;
     --report-only)

@@ -123,3 +123,16 @@ class TestRunShSmoke:
         )
         assert result.returncode == 2
         assert "Unknown option" in result.stderr
+
+    @pytest.mark.parametrize("args", [["--model"], ["--model", "--report-only"], ["-m", "--no-query"]])
+    def test_model_requires_a_value(self, args):
+        result = subprocess.run(
+            ["bash", str(PROJECT_ROOT / "run.sh"), *args],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 2
+        assert "requires a model value" in result.stderr
+        assert "Query Meraki API" not in result.stdout
