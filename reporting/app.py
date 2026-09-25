@@ -155,7 +155,6 @@ def build_org_report(
     switch_port_statuses = _flatten_ports(switch_port_statuses_by_switch, "switch_port_statuses.json")
     networks = _load_artifact("networks.json", list, [], required=True)
     security_baseline = _load_artifact("security_baseline.json", dict, {}, required=True)
-    org_dirs = find_org_dirs(BACKUPS_DIR)
     network_names = {
         n.get("id"): n.get("name", n.get("id", ""))
         for n in networks
@@ -2387,13 +2386,13 @@ def build_org_report(
         if isinstance(licensing_data, dict)
         else None
     )
-    org_license_paths = [os.path.join(path, "licensing.json") for path in org_dirs]
-    org_license_payloads = [load_json(path) for path in org_license_paths]
-    coverage_total = len(org_license_payloads)
-    coverage_ok = sum(
-        1
-        for payload in org_license_payloads
-        if isinstance(payload, dict) and not payload.get("error")
+    licensing_path = os.path.join(org_dir, "licensing.json")
+    coverage_total = 1
+    coverage_ok = int(
+        os.path.isfile(licensing_path)
+        and isinstance(licensing_data, dict)
+        and bool(licensing_data)
+        and not licensing_data.get("error")
     )
 
     # Build license rows — supports both co-term key lists and per-device status APIs.

@@ -81,6 +81,27 @@ class TestBuildOrgReport:
         """Fixture has one expired license key."""
         assert "Expired" in report_html or "expired" in report_html.lower()
 
+    def test_licensing_coverage_is_scoped_to_requested_org(self, tmp_path, monkeypatch):
+        """A report must not disclose licensing coverage from sibling org backups."""
+        from reporting.app import build_org_report
+
+        selected_org = tmp_path / "selected-org"
+        other_org = tmp_path / "other-org"
+        shutil.copytree(FIXTURES, selected_org)
+        shutil.copytree(FIXTURES, other_org)
+        (other_org / "licensing.json").write_text(
+            json.dumps({"licenseMode": "co-term", "licenses": []})
+        )
+
+        # Reproduce the old global-discovery path with two sibling organizations.
+        import reporting.app as report_app
+        monkeypatch.setattr(report_app, "BACKUPS_DIR", str(tmp_path))
+
+        html = build_org_report(str(selected_org), "Selected Org")
+
+        assert "Org backup coverage: <strong>1/1</strong>" in html
+        assert "Org backup coverage: <strong>2/2</strong>" not in html
+
     def test_wpc_topology_excluded(self, report_html):
         """Topology section should still exist even with empty LLDP fixture."""
         assert "topology" in report_html
