@@ -34,8 +34,17 @@ All output is written to `backups/<org>/` (gitignored):
 
 - `recommendations.md` — per-org findings and recommendations
 - `report.html` / `report.pdf` — full rendered report
+- `reports/<revision_id>/` — immutable report set for one generation run
+- `reports/<revision_id>/manifest.json` — report version, input fingerprint, schema version, and available variants
+- `reports/index.json` — latest revision pointer and revision history
+- `report_exec_summary.*` / `report_backup_settings.*` — latest split-report aliases
 - `backups/master_recommendations.md` — combined across all orgs
 - `backups/recommendations_ai_enhanced.md` — LLM-reviewed version
+
+Each report generation keeps its full, executive, and backup-settings outputs in a
+UTC, collision-resistant revision directory. The root-level report files remain
+latest-run aliases for existing automation. Compare `input_fingerprint` values in
+`reports/index.json` to determine whether the source backup changed between runs.
 
 ## Optional Pricing Input
 

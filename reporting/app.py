@@ -2,7 +2,8 @@
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 from .common import (
@@ -29,6 +30,7 @@ from .sections import (
     _build_wan_capacity_section,
 )
 from .html_shell import build_html, write_pdf
+from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
 
 log = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2718,6 +2720,67 @@ def build_org_report(
         return backup_body
     return full_body
 
+
+def _write_report_variant(
+    revision: ReportRevision,
+    org_dir: str,
+    org_slug: str,
+    archive_stamp: str,
+    variant: str,
+    title: str,
+    body: str,
+) -> None:
+    """Write one report variant to its revision directory and latest aliases."""
+    html = build_html(title, body)
+    revision_html_path = revision.write_html(variant, html)
+
+    suffixes = {
+        "full": "report",
+        "exec": "exec_summary_report",
+        "backup": "backup_settings_report",
+    }
+    aliases = {
+        "full": ("report.html", "report.pdf"),
+        "exec": ("report_exec_summary.html", "report_exec_summary.pdf"),
+        "backup": ("report_backup_settings.html", "report_backup_settings.pdf"),
+    }
+    suffix = suffixes[variant]
+    html_alias_name, pdf_alias_name = aliases[variant]
+    org_path = Path(org_dir)
+    archive_html_path = org_path / f"{org_slug}_{archive_stamp}_{suffix}.html"
+    html_alias_path = org_path / html_alias_name
+    atomic_copy(revision_html_path, archive_html_path)
+    atomic_copy(revision_html_path, html_alias_path)
+
+    revision_pdf_path = revision.pdf_path(variant)
+    pdf_available = write_pdf(str(revision_html_path), str(revision_pdf_path))
+    if pdf_available:
+        archive_pdf_path = org_path / f"{org_slug}_{archive_stamp}_{suffix}.pdf"
+        pdf_alias_path = org_path / pdf_alias_name
+        atomic_copy(revision_pdf_path, archive_pdf_path)
+        atomic_copy(revision_pdf_path, pdf_alias_path)
+        log.info("%s PDF -> %s", variant.title(), archive_pdf_path)
+    else:
+        # Do not leave a PDF alias from an older revision looking current.
+        if revision_pdf_path.exists():
+            revision_pdf_path.unlink()
+        archive_pdf_path = None
+        pdf_alias_path = org_path / pdf_alias_name
+        try:
+            pdf_alias_path.unlink()
+        except FileNotFoundError:
+            pass
+        log.info("%s HTML -> %s (no PDF tool found)", variant.title(), archive_html_path)
+
+    revision.record_pdf(variant, pdf_available)
+    revision.record_paths(
+        variant,
+        html_archive=archive_html_path,
+        html_alias=html_alias_path,
+        pdf_archive=archive_pdf_path,
+        pdf_alias=pdf_alias_path if pdf_available else None,
+    )
+
 def main() -> int:
     org_dirs = find_org_dirs(BACKUPS_DIR)
     if not org_dirs:
@@ -2744,68 +2807,58 @@ def main() -> int:
                         org_name = m.group(1)
 
         log.info("Generating report for: %s", org_name)
-        _run_ts = datetime.now()
-        body = build_org_report(org_dir, org_name)
-        html = build_html(f"{org_name} — Network Health Report", body)
+        _run_ts = datetime.now(timezone.utc)
+        _slug = re.sub(r"[^\w]+", "_", org_name).strip("_") or "organization"
+        _stamp = _run_ts.strftime("%Y-%m-%d_%H%M%S_%f")
+        _meta = load_json(os.path.join(org_dir, "backup_meta.json")) or {}
+        _schema_version = _meta.get("schema_version") if isinstance(_meta, dict) else None
+        revision = ReportRevision(
+            org_dir=org_dir,
+            org_name=org_name,
+            generated_at=_run_ts,
+            report_version=REPORT_VERSION,
+            backup_schema_version=_schema_version,
+            input_fingerprint=fingerprint_inputs(org_dir),
+        )
+        try:
+            body = build_org_report(org_dir, org_name)
+            _write_report_variant(
+                revision,
+                org_dir,
+                _slug,
+                _stamp,
+                "full",
+                f"{org_name} — Network Health Report",
+                body,
+            )
 
-        _slug = re.sub(r"[^\w]+", "_", org_name).strip("_")
-        _stamp = _run_ts.strftime("%Y-%m-%d_%H%M")
-        html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_report.html")
-        pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_report.pdf")
-        # Stable aliases so downstream scripts and run.sh always find report.html/pdf
-        html_alias = os.path.join(org_dir, "report.html")
-        pdf_alias  = os.path.join(org_dir, "report.pdf")
+            exec_body = build_org_report(org_dir, org_name, report_kind="exec")
+            _write_report_variant(
+                revision,
+                org_dir,
+                _slug,
+                _stamp,
+                "exec",
+                f"{org_name} — Executive Summary",
+                exec_body,
+            )
 
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        # Overwrite alias (plain copy — no symlinks for cross-platform safety)
-        with open(html_alias, "w", encoding="utf-8") as f:
-            f.write(html)
-
-        ok = write_pdf(html_path, pdf_path)
-        if ok:
-            import shutil
-            shutil.copy2(pdf_path, pdf_alias)
-            log.info("PDF → %s", pdf_path)
-        else:
-            log.info("HTML → %s  (no PDF tool found)", html_path)
-        generated += 1
-
-        # Executive summary split report
-        exec_body = build_org_report(org_dir, org_name, report_kind="exec")
-        exec_html = build_html(f"{org_name} — Executive Summary", exec_body)
-        exec_html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_exec_summary_report.html")
-        exec_pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_exec_summary_report.pdf")
-        exec_html_alias = os.path.join(org_dir, "report_exec_summary.html")
-        exec_pdf_alias  = os.path.join(org_dir, "report_exec_summary.pdf")
-        with open(exec_html_path, "w", encoding="utf-8") as f:
-            f.write(exec_html)
-        with open(exec_html_alias, "w", encoding="utf-8") as f:
-            f.write(exec_html)
-        if write_pdf(exec_html_path, exec_pdf_path):
-            import shutil
-            shutil.copy2(exec_pdf_path, exec_pdf_alias)
-            log.info("Exec Summary PDF → %s", exec_pdf_path)
-        else:
-            log.info("Exec Summary HTML → %s  (no PDF tool found)", exec_html_path)
-
-        # Backup settings split report
-        backup_body = build_org_report(org_dir, org_name, report_kind="backup")
-        backup_html = build_html(f"{org_name} — Backup Settings Report", backup_body)
-        backup_html_path = os.path.join(org_dir, f"{_slug}_{_stamp}_backup_settings_report.html")
-        backup_pdf_path  = os.path.join(org_dir, f"{_slug}_{_stamp}_backup_settings_report.pdf")
-        backup_html_alias = os.path.join(org_dir, "report_backup_settings.html")
-        backup_pdf_alias  = os.path.join(org_dir, "report_backup_settings.pdf")
-        with open(backup_html_path, "w", encoding="utf-8") as f:
-            f.write(backup_html)
-        with open(backup_html_alias, "w", encoding="utf-8") as f:
-            f.write(backup_html)
-        if write_pdf(backup_html_path, backup_pdf_path):
-            import shutil
-            shutil.copy2(backup_pdf_path, backup_pdf_alias)
-            log.info("Backup Settings PDF → %s", backup_pdf_path)
-        else:
-            log.info("Backup Settings HTML → %s  (no PDF tool found)", backup_html_path)
+            backup_body = build_org_report(org_dir, org_name, report_kind="backup")
+            _write_report_variant(
+                revision,
+                org_dir,
+                _slug,
+                _stamp,
+                "backup",
+                f"{org_name} — Backup Settings Report",
+                backup_body,
+            )
+            revision.finalize()
+            generated += 1
+            log.info("Report revision %s -> %s", revision.revision_id, revision.revision_dir)
+        except Exception as exc:
+            revision.finalize(status="failed", error=f"{type(exc).__name__}: {exc}")
+            raise
 
     log.info("Done — %d report(s) generated.", generated)
     return 0
