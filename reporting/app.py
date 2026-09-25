@@ -69,6 +69,13 @@ def _load_inbound_firewall_rules(
         if not os.path.exists(path):
             results[network_id] = {"status": "missing", "rules": []}
             continue
+        if os.path.exists(f"{path}.error"):
+            warnings.append(
+                "appliance_inbound_firewall_rules.json has a failed fetch marker; "
+                "stale rule data was not rendered"
+            )
+            results[network_id] = {"status": "unavailable", "rules": []}
+            continue
         payload = load_json_checked(path, (dict, list), None, warnings)
         if payload is None:
             results[network_id] = {"status": "unavailable", "rules": []}

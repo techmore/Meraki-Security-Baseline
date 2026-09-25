@@ -211,6 +211,38 @@ class TestBuildOrgReport:
         assert "<script>" not in html
         assert "&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
+    def test_failed_inbound_firewall_fetch_does_not_render_stale_rules(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "networks.json").write_text(json.dumps([
+            {"id": "N_test_001", "name": "Main", "productTypes": ["appliance"]}
+        ]))
+        network_dir = org_dir / "networks" / "N_test_001"
+        network_dir.mkdir(parents=True)
+        artifact = network_dir / "appliance_inbound_firewall_rules.json"
+        artifact.write_text(json.dumps({
+            "rules": [{
+                "comment": "Stale rule",
+                "policy": "allow",
+                "srcCidr": "any",
+                "destCidr": "10.0.0.10/32",
+                "destPort": "443",
+            }]
+        }))
+        (network_dir / "appliance_inbound_firewall_rules.json.error").write_text(
+            json.dumps({"status": "error", "message": "HTTP 503"})
+        )
+
+        html = build_org_report(str(org_dir), "Failed Fetch Org")
+
+        firewall_section = html.split("Firewall Rules &amp; Internet Exposure", 1)[1].split(
+            "</section>", 1
+        )[0]
+        assert "Stale rule" not in firewall_section
+        assert "Not evaluated" in firewall_section
+
     def test_security_fail_check_rendered(self, report_html):
         """The fixture has 1 failing IPS check — it should appear in report."""
         assert "Intrusion Prevention" in report_html
