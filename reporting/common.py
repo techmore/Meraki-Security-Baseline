@@ -49,6 +49,40 @@ def normalize_security_status(value: Any) -> str:
     return aliases.get(status, "info")
 
 
+def normalize_eox_status(value: Any) -> str:
+    """Normalize Meraki end-of-life lifecycle values to stable report keys."""
+    status = re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+    aliases = {
+        "active": "active",
+        "current": "active",
+        "supported": "active",
+        "nearendofsupport": "nearendofsupport",
+        "nearendoflife": "nearendofsupport",
+        "neareos": "nearendofsupport",
+        "endofsale": "endofsale",
+        "eos": "endofsale",
+        "endofsupport": "endofsupport",
+        "eol": "endofsupport",
+        "endoflife": "endofsupport",
+    }
+    return aliases.get(status, "unknown")
+
+
+def eox_status_label(value: Any) -> str:
+    """Return a human-readable EOX status without treating unknown data as healthy."""
+    labels = {
+        "active": "Active",
+        "nearendofsupport": "Near end of support",
+        "endofsale": "End of sale",
+        "endofsupport": "End of support",
+    }
+    normalized = normalize_eox_status(value)
+    if normalized in labels:
+        return labels[normalized]
+    raw = str(value or "").strip()
+    return raw.title() if raw else "Not reported"
+
+
 def safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
     """Coerce API numeric values without allowing one malformed field to abort a report."""
     if isinstance(value, bool) or value is None or (isinstance(value, str) and not value.strip()):

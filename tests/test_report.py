@@ -145,6 +145,35 @@ class TestBuildOrgReport:
         """Fixture has one expired license key."""
         assert "Expired" in report_html or "expired" in report_html.lower()
 
+    def test_model_inventory_includes_authoritative_eox_fields(self, tmp_path):
+        from reporting.app import build_org_report
+
+        org_dir = tmp_path / "org"
+        shutil.copytree(FIXTURES, org_dir)
+        (org_dir / "inventory_devices.json").write_text(json.dumps([
+            {
+                "serial": "Q2SW-TEST-0001",
+                "model": "MS225-24P",
+                "networkId": "N_test_001",
+                "eox": {
+                    "status": "nearEndOfSupport",
+                    "endOfSaleAt": "2024-01-02T00:00:00Z",
+                    "endOfSupportAt": "2027-12-31T00:00:00Z",
+                },
+            }
+        ]))
+
+        html = build_org_report(str(org_dir), "EOX Org")
+
+        assert "Lifecycle / EOL" in html
+        assert "Near end of support" in html
+        assert "2024-01-02" in html
+        assert "2027-12-31" in html
+
+    def test_model_inventory_marks_heuristic_lifecycle_without_eox_data(self, report_html):
+        assert "Lifecycle / EOL" in report_html
+        assert "Not reported" in report_html
+
     def test_licensing_coverage_is_scoped_to_requested_org(self, tmp_path, monkeypatch):
         """A report must not disclose licensing coverage from sibling org backups."""
         from reporting.app import build_org_report

@@ -19,6 +19,8 @@ from reporting.common import (
     parse_datetime,
     safe_float,
     _he,
+    eox_status_label,
+    normalize_eox_status,
 )
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -199,6 +201,26 @@ class TestNormalizeSecurityStatus:
     )
     def test_canonical_status(self, value, expected):
         assert normalize_security_status(value) == expected
+
+
+class TestNormalizeEoxStatus:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("active", "active"),
+            ("nearEndOfSupport", "nearendofsupport"),
+            ("end of sale", "endofsale"),
+            ("EOL", "endofsupport"),
+            (None, "unknown"),
+            ("unexpected", "unknown"),
+        ],
+    )
+    def test_canonical_status(self, value, expected):
+        assert normalize_eox_status(value) == expected
+
+    def test_human_label_does_not_hide_missing_data(self):
+        assert eox_status_label(None) == "Not reported"
+        assert eox_status_label("endOfSupport") == "End of support"
 
 
 # ── _he HTML escaping ─────────────────────────────────────────────────────────

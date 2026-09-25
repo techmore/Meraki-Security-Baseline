@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from .common import (
     BACKUPS_DIR,
@@ -18,7 +18,9 @@ from .common import (
     load_json,
     load_json_checked,
     md_to_html,
+    eox_status_label,
     normalize_security_status,
+    normalize_eox_status,
     parse_datetime,
     render_kpi_row,
     render_section,
@@ -172,6 +174,7 @@ def build_org_report(
         return parsed
 
     eox_devices = []
+    model_eox: Dict[str, Dict[str, Any]] = {}
     lifecycle_by_network: Dict[str, Dict[str, int]] = {}
     if isinstance(inventory_devices, list):
         for dev in inventory_devices:
@@ -181,12 +184,29 @@ def build_org_report(
             if not isinstance(eox, dict):
                 _data_quality_warnings.append("inventory_devices.json contains a non-object eox field")
                 eox = {}
-            status = str(eox.get("status") or "").lower()
+            model = str(dev.get("model") or "").strip()
+            status = normalize_eox_status(eox.get("status"))
+            model_info = model_eox.setdefault(
+                model,
+                {"statuses": set(), "endOfSale": [], "endOfSupport": []},
+            ) if model else None
+            if model_info is not None:
+                if status != "unknown":
+                    model_info["statuses"].add(status)
+                for field in ("endOfSale", "endOfSupport"):
+                    raw_date = eox.get(f"{field}At")
+                    if raw_date:
+                        parsed_date = _parse_dt(
+                            raw_date,
+                            f"inventory_devices.json.{field}At",
+                        )
+                        if parsed_date is not None:
+                            model_info[field].append(parsed_date)
             net_name = network_names.get(dev.get("networkId"), "Unassigned")
-            if status:
+            if status != "unknown":
                 lifecycle_by_network.setdefault(net_name, {})
                 lifecycle_by_network[net_name][status] = lifecycle_by_network[net_name].get(status, 0) + 1
-            if status and status != "active":
+            if status != "unknown" and status != "active":
                 eox_devices.append({
                     "name": dev.get("name") or dev.get("model") or dev.get("serial", ""),
                     "model": dev.get("model", ""),
@@ -572,6 +592,10 @@ def build_org_report(
     _eol_models = [
         m for m, _ in top_models
         if any(str(m).upper().startswith(p) for p in _EOL_PREFIXES)
+        or any(
+            status in {"nearendofsupport", "endofsupport"}
+            for status in model_eox.get(str(m), {}).get("statuses", set())
+        )
     ]
     _model_count = len(top_models)
     if _eol_models:
@@ -1161,6 +1185,45 @@ def build_org_report(
             f"</tr>"
         )
 
+    def _model_eox_cells(model: str) -> Tuple[str, str, str]:
+        info = model_eox.get(model) or {}
+        statuses = info.get("statuses") or set()
+        if statuses:
+            status = min(
+                statuses,
+                key=lambda value: {
+                    "endofsupport": 0,
+                    "nearendofsupport": 1,
+                    "endofsale": 2,
+                    "active": 3,
+                }.get(value, 4),
+            )
+            status_label = eox_status_label(status)
+            if len(statuses) > 1:
+                status_label += " (mixed)"
+        elif info.get("endOfSale") or info.get("endOfSupport"):
+            status_label = "Dates reported"
+        elif any(str(model).upper().startswith(prefix) for prefix in _EOL_PREFIXES):
+            status_label = "Legacy heuristic"
+        else:
+            status_label = "Not reported"
+
+        def _earliest(field: str) -> str:
+            dates = info.get(field) or []
+            return min(dates).date().isoformat() if dates else "Not reported"
+
+        return status_label, _earliest("endOfSale"), _earliest("endOfSupport")
+
+    model_inventory_rows = []
+    for model, count in top_models[:12]:
+        lifecycle, end_of_sale, end_of_support = _model_eox_cells(model)
+        model_inventory_rows.append(
+            f"<tr><td>{_he(model)}</td><td>{count}</td>"
+            f"<td>{_he(_model_capability_summary(model))}</td>"
+            f"<td>{_he(lifecycle)}</td><td>{_he(end_of_sale)}</td>"
+            f"<td>{_he(end_of_support)}</td></tr>"
+        )
+
     network_empty_row = (
         '<tr><td colspan="6" class="empty-state">'
         "No devices found in this organization's backup. Run a full backup to populate this section."
@@ -1219,14 +1282,16 @@ def build_org_report(
         </tbody>
       </table>
       <h3>Model Inventory &amp; Capabilities</h3>
+      <p class="section-note">Lifecycle status and dates come from the Meraki inventory EOX fields when collected. Dates show the earliest observed date for each model; heuristic rows are clearly marked when authoritative EOX data is unavailable.</p>
       <table class="data">
         <thead>
           <tr>
             <th>Model</th><th>Count</th><th>Capability Summary</th>
+            <th>Lifecycle / EOL</th><th>End of Sale</th><th>End of Support</th>
           </tr>
         </thead>
         <tbody>
-          {"".join(f"<tr><td>{_he(model)}</td><td>{count}</td><td>{_he(_model_capability_summary(model))}</td></tr>" for model, count in top_models[:12]) if top_models else '<tr><td colspan="3" class="empty-state">No model inventory data available.</td></tr>'}
+          {"".join(model_inventory_rows) if model_inventory_rows else '<tr><td colspan="6" class="empty-state">No model inventory data available.</td></tr>'}
         </tbody>
       </table>
       <div class="summary-card">
@@ -2689,7 +2754,10 @@ def build_org_report(
         if not _map_key:
             continue
         _unifi_name, _meraki_price, _unifi_price = _UNIFI_MAP[_map_key]
-        _is_eol = any(_mprefix.startswith(p) for p in _EOL_PREFIXES)
+        _is_eol = any(_mprefix.startswith(p) for p in _EOL_PREFIXES) or any(
+            status in {"nearendofsupport", "endofsupport"}
+            for status in model_eox.get(str(_model), {}).get("statuses", set())
+        )
         _row_mx  = _meraki_price * _count
         _row_ux  = _unifi_price  * _count
         _meraki_total += _row_mx
