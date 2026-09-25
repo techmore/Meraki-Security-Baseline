@@ -103,12 +103,11 @@ def _load_inbound_firewall_rules(
     return results
 
 
-def build_org_report(
+def _build_org_report_variants(
     org_dir: str,
     org_name: str,
     exec_purpose: str = "",
-    report_kind: str = "full",
-) -> str:
+) -> Dict[str, str]:
     # ── Schema compatibility check ────────────────────────────────────────────
     _schema_warnings = check_backup_schema(org_dir)
     _data_quality_warnings: List[str] = []
@@ -3078,11 +3077,28 @@ def build_org_report(
         + unifi_html
     )
 
-    if report_kind == "exec":
-        return exec_body
-    if report_kind == "backup":
-        return backup_body
-    return full_body
+    return {
+        "full": full_body,
+        "exec": exec_body,
+        "backup": backup_body,
+    }
+
+
+def build_org_report(
+    org_dir: str,
+    org_name: str,
+    exec_purpose: str = "",
+    report_kind: str = "full",
+) -> str:
+    """Build one report variant using the shared organization render context."""
+    variants = _build_org_report_variants(
+        org_dir,
+        org_name,
+        exec_purpose=exec_purpose,
+    )
+    if report_kind not in variants:
+        raise ValueError(f"Unknown report kind: {report_kind}")
+    return variants[report_kind]
 
 
 def _write_report_variant(
@@ -3185,7 +3201,8 @@ def main() -> int:
             input_fingerprint=fingerprint_inputs(org_dir),
         )
         try:
-            body = build_org_report(org_dir, org_name)
+            report_variants = _build_org_report_variants(org_dir, org_name)
+            body = report_variants["full"]
             _write_report_variant(
                 revision,
                 org_dir,
@@ -3196,7 +3213,7 @@ def main() -> int:
                 body,
             )
 
-            exec_body = build_org_report(org_dir, org_name, report_kind="exec")
+            exec_body = report_variants["exec"]
             _write_report_variant(
                 revision,
                 org_dir,
@@ -3207,7 +3224,7 @@ def main() -> int:
                 exec_body,
             )
 
-            backup_body = build_org_report(org_dir, org_name, report_kind="backup")
+            backup_body = report_variants["backup"]
             _write_report_variant(
                 revision,
                 org_dir,

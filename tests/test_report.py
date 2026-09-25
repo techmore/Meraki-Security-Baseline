@@ -69,6 +69,16 @@ class TestBuildOrgReport:
         assert "<span class=\"toc-num\">16</span>" in html
         assert "UniFi Comparison &amp; Refresh Planning" in html
 
+    def test_variant_builder_returns_all_variants_from_one_context(self):
+        from reporting.app import _build_org_report_variants
+
+        variants = _build_org_report_variants(FIXTURES, "Test Org")
+
+        assert set(variants) == {"full", "exec", "backup"}
+        assert "Best-Practice Coverage" in variants["full"]
+        assert "Best-Practice Coverage" not in variants["exec"]
+        assert "UniFi Comparison &amp; Refresh Planning" in variants["backup"]
+
     def test_licensing_section_present(self, report_html):
         assert "licensing" in report_html
         assert "Licensing Status" in report_html
