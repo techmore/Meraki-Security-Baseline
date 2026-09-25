@@ -41,6 +41,7 @@ from .sections import (
     _build_switch_detail_section,
     _build_wan_capacity_section,
 )
+from .best_practices import build_best_practice_checks, render_best_practice_section
 from .html_shell import build_html, write_pdf
 from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
 
@@ -539,6 +540,31 @@ def build_org_report(
             switch_port_issues,
             port_data_available=bool(switch_port_statuses),
         )
+
+    best_practice_checks = build_best_practice_checks(
+        networks=networks,
+        devices_avail=devices_avail,
+        channel_util=channel_util,
+        rf_profiles=rf_profiles,
+        firmware_upgrades=firmware_upgrades,
+        switch_port_statuses=switch_port_statuses,
+        security_checks=security_checks,
+        alerts_history=alerts_history,
+        wireless_ssids=wireless_ssids,
+        ap_to_switch=ap_to_switch,
+        artifact_available={
+            name: os.path.exists(os.path.join(org_dir, name))
+            for name in (
+                "channel_utilization_by_device.json",
+                "wireless_rf_profiles.json",
+                "firmware_upgrades.json",
+                "switch_port_statuses.json",
+                "alerts_history.json",
+                "wireless_ssids.json",
+            )
+        },
+    )
+    best_practice_html = render_best_practice_section(best_practice_checks)
 
     # ── Health at a Glance domain scoring ──────────────────────────────────
     def _hcard(domain: str, rating: str, stat: str, detail: str) -> str:
@@ -1359,6 +1385,7 @@ def build_org_report(
           {"".join(model_inventory_rows) if model_inventory_rows else '<tr><td colspan="6" class="empty-state">No model inventory data available.</td></tr>'}
         </tbody>
       </table>
+      {best_practice_html}
       <div class="summary-card">
         <div class="summary-title">PoE Budget Note</div>
         <div class="summary-body">

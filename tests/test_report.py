@@ -48,6 +48,12 @@ class TestBuildOrgReport:
         assert "Firewall Rules &amp; Internet Exposure" in report_html
         assert "Not evaluated" in report_html
 
+    def test_best_practice_coverage_present(self, report_html):
+        assert "best-practice-coverage" in report_html
+        assert "Best-Practice Coverage" in report_html
+        assert "Collection Gaps" in report_html
+        assert "Administrator inventory" in report_html
+
     def test_traffic_flows_present(self, report_html):
         assert "traffic-flows" in report_html
 

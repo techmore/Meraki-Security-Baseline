@@ -118,6 +118,16 @@ pip-audit -r requirements.txt --progress-spinner off
 Runtime dependencies are pinned in `requirements.txt`; Dependabot opens controlled
 weekly update pull requests instead of allowing unreviewed releases into CI.
 
+## Best-Practice Coverage
+
+The report includes a report-native best-practice coverage adapter informed by
+[obrigg/meraki-health-check](https://github.com/obrigg/meraki-health-check). The
+upstream executable and source are not vendored or executed. Checks are derived
+from this repository's redacted backup artifacts and label each result as
+collected, partial, or not collected. Internal thresholds are triage signals,
+not authoritative Meraki or Cisco guidance; upstream licensing must be reviewed
+before reusing any external implementation.
+
 ## License
 
 The upstream baseline project includes GPL-3.0 licensed components. Review licensing obligations before redistributing a packaged release.
