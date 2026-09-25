@@ -131,17 +131,58 @@ def write_json(path: str, payload: Any) -> None:
         json.dump(payload, f, indent=2)
 
 
+def _cache_error_path(path: str) -> str:
+    """Return the sidecar path used to record the latest failed fetch."""
+    return f"{path}.error"
+
+
+def _cache_payload_is_error(payload: Any) -> bool:
+    """Return True for the error envelopes written by failed API fetches."""
+    if isinstance(payload, dict):
+        return "error" in payload or str(payload.get("status", "")).lower() == "error"
+    if isinstance(payload, list):
+        return any(isinstance(item, dict) and "error" in item for item in payload)
+    return False
+
+
+def _clear_cache_error(path: str) -> None:
+    try:
+        os.unlink(_cache_error_path(path))
+    except FileNotFoundError:
+        pass
+
+
+def _write_cache_success(path: str, payload: Any) -> None:
+    """Write successful data and clear any failure marker for the artifact."""
+    write_json(path, payload)
+    _clear_cache_error(path)
+
+
+def _write_cache_error(path: str, error: str, endpoint: Optional[str] = None) -> None:
+    """Record a fetch failure without replacing the last known-good artifact."""
+    metadata: Dict[str, Any] = {
+        "status": "error",
+        "error": str(error),
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    if endpoint:
+        metadata["endpoint"] = endpoint
+    write_json(_cache_error_path(path), metadata)
+
+
 def _cache_is_fresh(path: str, max_age_h: float = 12.0, force: bool = False) -> bool:
-    """Return True if path exists, is readable JSON, and is younger than max_age_h hours."""
+    """Return True only for recent successful data without a failure marker."""
     if force or not os.path.exists(path):
+        return False
+    if os.path.exists(_cache_error_path(path)):
         return False
     age_h = (time.time() - os.path.getmtime(path)) / 3600.0
     if age_h >= max_age_h:
         return False
     try:
         with open(path, encoding="utf-8") as f:
-            json.load(f)
-        return True
+            payload = json.load(f)
+        return not _cache_payload_is_error(payload)
     except Exception:
         return False
 
@@ -165,7 +206,7 @@ def _artifact_path(org_dir: str, category: str, item_id: str, filename: str) -> 
 def _write_granular_json(org_dir: str, category: str, item_id: str, filename: str, payload: Any) -> None:
     path = _artifact_path(org_dir, category, item_id, filename)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_json(path, payload)
+    _write_cache_success(path, payload)
 
 
 def _read_granular_json(org_dir: str, category: str, item_id: str, filename: str) -> Any:
@@ -1002,10 +1043,11 @@ def main() -> int:
                     log_line(log_f, "INFO", f"{label} (cached)")
                     return data if isinstance(data, list) else []
                 data, err = safe_paged_get(path_suffix, api_key)
-                write_json(p, data if not err else {"error": err})
                 if err:
+                    _write_cache_error(p, err, endpoint=path_suffix)
                     log_line(log_f, "WARN", f"{label} failed: {err}")
                 else:
+                    _write_cache_success(p, data)
                     log_line(log_f, "INFO", f"{label}: {len(data)} items fetched")
                 return data if not err else []
 
@@ -1016,10 +1058,11 @@ def main() -> int:
                     log_line(log_f, "INFO", f"{label} (cached)")
                     return data, None
                 data, err = safe_get_one(path_suffix, api_key, params=params)
-                write_json(p, data if not err else {"error": err})
                 if err:
+                    _write_cache_error(p, err, endpoint=path_suffix)
                     log_line(log_f, "WARN", f"{label} failed: {err}")
                 else:
+                    _write_cache_success(p, data)
                     log_line(log_f, "INFO", f"{label} fetched")
                 return data, err
 
@@ -1040,10 +1083,11 @@ def main() -> int:
                 log_line(log_f, "INFO", f"Licensing (cached) for {org_name}")
             else:
                 licensing, err = fetch_licensing_overview(str(org_id), api_key)
-                write_json(_lic_path, licensing if not err else {"error": err})
                 if err:
+                    _write_cache_error(_lic_path, err, endpoint=f"/organizations/{org_id}/licensing")
                     log_line(log_f, "WARN", f"Licensing failed for {org_name}: {err}")
                 else:
+                    _write_cache_success(_lic_path, licensing)
                     log_line(log_f, "INFO", f"Licensing fetched for {org_name}")
 
             firmware, _fw_err = _cached_safe_get(
@@ -1081,6 +1125,7 @@ def main() -> int:
                 if _granular_cache_fresh(org_dir, "switches", serial, "port_statuses.json", max_age_h, force):
                     statuses = _read_granular_json(org_dir, "switches", serial, "port_statuses.json")
                 else:
+                    status_error = None
                     try:
                         statuses = paged_get(
                             f"/devices/{serial}/switch/ports/statuses",
@@ -1088,34 +1133,64 @@ def main() -> int:
                             params={"timespan": TIMESPAN_24H},
                         )
                     except Exception as e:
-                        statuses = [{"error": str(e)}]
+                        statuses = []
+                        status_error = str(e)
                         log_line(log_f, "ERROR", f"Switch port statuses failed for {serial}: {e}")
-                    _write_granular_json(org_dir, "switches", serial, "port_statuses.json", statuses)
+                    status_path = _artifact_path(org_dir, "switches", serial, "port_statuses.json")
+                    if status_error:
+                        _write_cache_error(
+                            status_path,
+                            status_error,
+                            endpoint=f"/devices/{serial}/switch/ports/statuses",
+                        )
+                    else:
+                        _write_granular_json(org_dir, "switches", serial, "port_statuses.json", statuses)
                 port_statuses[serial] = statuses if isinstance(statuses, list) else [{"error": "Invalid cached data"}]
 
                 if _granular_cache_fresh(org_dir, "switches", serial, "port_configs.json", max_age_h, force):
                     configs = _read_granular_json(org_dir, "switches", serial, "port_configs.json")
                 else:
+                    config_error = None
                     try:
                         configs = paged_get(f"/devices/{serial}/switch/ports", api_key)
                     except Exception as e:
-                        configs = [{"error": str(e)}]
+                        configs = []
+                        config_error = str(e)
                         log_line(log_f, "ERROR", f"Switch port configs failed for {serial}: {e}")
-                    _write_granular_json(org_dir, "switches", serial, "port_configs.json", configs)
+                    config_path = _artifact_path(org_dir, "switches", serial, "port_configs.json")
+                    if config_error:
+                        _write_cache_error(
+                            config_path,
+                            config_error,
+                            endpoint=f"/devices/{serial}/switch/ports",
+                        )
+                    else:
+                        _write_granular_json(org_dir, "switches", serial, "port_configs.json", configs)
                 port_configs[serial] = configs if isinstance(configs, list) else [{"error": "Invalid cached data"}]
 
                 if _granular_cache_fresh(org_dir, "switches", serial, "lldp_cdp.json", max_age_h, force):
                     lldp = _read_granular_json(org_dir, "switches", serial, "lldp_cdp.json")
                 else:
+                    lldp_error = None
                     try:
                         lldp, err = safe_get_one(f"/devices/{serial}/lldpCdp", api_key)
-                        lldp = lldp if not err else {"error": err}
                         if err:
+                            lldp = {}
+                            lldp_error = err
                             log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {err}")
                     except Exception as e:
-                        lldp = {"error": str(e)}
+                        lldp = {}
+                        lldp_error = str(e)
                         log_line(log_f, "WARN", f"LLDP/CDP failed for {serial}: {e}")
-                    _write_granular_json(org_dir, "switches", serial, "lldp_cdp.json", lldp)
+                    lldp_path = _artifact_path(org_dir, "switches", serial, "lldp_cdp.json")
+                    if lldp_error:
+                        _write_cache_error(
+                            lldp_path,
+                            lldp_error,
+                            endpoint=f"/devices/{serial}/lldpCdp",
+                        )
+                    else:
+                        _write_granular_json(org_dir, "switches", serial, "lldp_cdp.json", lldp)
                 lldp_cdp[serial] = lldp if isinstance(lldp, dict) else {"error": "Invalid cached data"}
 
             write_json(_sw_stat_path, port_statuses)
@@ -1145,7 +1220,11 @@ def main() -> int:
                         return _read_granular_json(org_dir, "networks", net_id, filename)
                     data, err = fetcher()
                     payload = data if not err else {"error": err}
-                    _write_granular_json(org_dir, "networks", net_id, filename, payload)
+                    artifact_path = _artifact_path(org_dir, "networks", net_id, filename)
+                    if err:
+                        _write_cache_error(artifact_path, err, endpoint=warn_label)
+                    else:
+                        _write_granular_json(org_dir, "networks", net_id, filename, payload)
                     if err:
                         level = "INFO" if capability_aware and is_capability_error(err) else "WARN"
                         log_line(log_f, level, f"{warn_label} for network {net_id}: {err}")
@@ -1296,8 +1375,14 @@ def main() -> int:
                     },
                 )
                 if err:
+                    _write_cache_error(
+                        _ch_path,
+                        err,
+                        endpoint=f"/organizations/{org_id}/wireless/devices/channelUtilization/byDevice",
+                    )
                     log_line(log_f, "WARN", f"Channel utilization failed for org {org_id}: {err}")
-                write_json(_ch_path, channel_utilization if not err else {"error": err})
+                else:
+                    _write_cache_success(_ch_path, channel_utilization)
             channel_data = channel_utilization if (not err and isinstance(channel_utilization, list)) else []
             channel_summary = summarize_channel_utilization(channel_data)
             write_json(_pf("poe_power_summary.json"), poe_summary)

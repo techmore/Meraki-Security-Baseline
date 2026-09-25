@@ -50,6 +50,31 @@ class TestCacheIsFresh:
         os.utime(str(p), (recent_time, recent_time))
         assert mb._cache_is_fresh(str(p), max_age_h=12) is True
 
+    def test_error_envelope_is_not_fresh(self, tmp_path):
+        p = tmp_path / "failed.json"
+        p.write_text(json.dumps({"error": "HTTP 500 for test"}))
+        assert mb._cache_is_fresh(str(p), max_age_h=12) is False
+
+    def test_error_item_list_is_not_fresh(self, tmp_path):
+        p = tmp_path / "failed-list.json"
+        p.write_text(json.dumps([{"error": "HTTP 429 for test"}]))
+        assert mb._cache_is_fresh(str(p), max_age_h=12) is False
+
+    def test_failure_sidecar_invalidates_last_known_good_data(self, tmp_path):
+        p = str(tmp_path / "data.json")
+        mb._write_cache_success(p, {"value": "known-good"})
+        mb._write_cache_error(p, "HTTP 503 for test", endpoint="/test")
+
+        assert mb._cache_is_fresh(p, max_age_h=12) is False
+        assert mb._load_json_file(p) == {"value": "known-good"}
+        metadata = mb._load_json_file(mb._cache_error_path(p))
+        assert metadata["status"] == "error"
+        assert metadata["endpoint"] == "/test"
+
+        mb._write_cache_success(p, {"value": "recovered"})
+        assert mb._cache_is_fresh(p, max_age_h=12) is True
+        assert not os.path.exists(mb._cache_error_path(p))
+
 
 # ── write_json / _load_json_file ──────────────────────────────────────────────
 
