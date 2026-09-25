@@ -42,6 +42,7 @@ from .sections import (
     _build_wan_capacity_section,
 )
 from .best_practices import build_best_practice_checks, render_best_practice_section
+from .context import load_report_data
 from .html_shell import build_html, write_pdf
 from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
 from .section_registry import render_report_sections, render_toc
@@ -123,101 +124,35 @@ def _build_org_report_variants(
             + "</div>"
         )
 
-    rec_path = os.path.join(org_dir, "recommendations.md")
-    rec_md = ""
-    if os.path.exists(rec_path):
-        try:
-            with open(rec_path, "r", encoding="utf-8") as f:
-                rec_md = f.read()
-        except (OSError, UnicodeError) as exc:
-            _data_quality_warnings.append(f"recommendations.md could not be read: {exc}")
-
-    # Load all relevant data files through a small validation boundary. Missing
-    # artifacts remain coverage gaps; malformed artifacts are named in a banner
-    # and replaced with safe defaults before section code sees them.
-    def _load_artifact(
-        filename: str,
-        expected_type: Any,
-        default: Any,
-        required: bool = False,
-    ) -> Any:
-        path = os.path.join(org_dir, filename)
-        if required and not os.path.exists(path):
-            _data_quality_warnings.append(
-                f"{filename} is missing; associated report sections have incomplete coverage"
-            )
-        return load_json_checked(
-            path,
-            expected_type,
-            default,
-            _data_quality_warnings,
-        )
-
-    inventory_summary = _load_artifact("inventory_summary.json", dict, {}, required=True)
-    poe_summary = _load_artifact("poe_power_summary.json", dict, {})
-    channel_util = _load_artifact("channel_utilization_by_device.json", list, [])
-    devices_avail = _load_artifact("devices_availabilities.json", list, [], required=True)
-    lldp_cdp = _load_artifact("lldp_cdp.json", dict, {})
-    wireless_stats = _load_artifact("wireless_connection_stats.json", dict, {})
-    # wireless_clients.json is {net_id: [client, …]} — flatten to a single list
-    _wc_raw = _load_artifact("wireless_clients.json", (dict, list), {})
-    if isinstance(_wc_raw, dict):
-        wireless_clients = [
-            cl for clients in _wc_raw.values()
-            if isinstance(clients, list)
-            for cl in clients
-            if isinstance(cl, dict)
-        ]
-    elif isinstance(_wc_raw, list):
-        wireless_clients = [cl for cl in _wc_raw if isinstance(cl, dict)]
-    else:
-        wireless_clients = []
-    switch_port_statuses_by_switch = _load_artifact(
-        "switch_port_statuses.json", (dict, list), {}, required=True
-    )
-    switch_port_configs_by_switch = _load_artifact("switch_port_configs.json", (dict, list), {})
-    uplink_statuses = _load_artifact("uplink_statuses.json", list, [], required=True)
-    appliance_uplinks_usage = _load_artifact("appliance_uplinks_usage.json", dict, {})
-    devices_statuses_raw = _load_artifact("devices_statuses.json", list, [])
-    clients_overview_raw = _load_artifact("clients_overview.json", dict, {})
-    licensing_data = _load_artifact("licensing.json", (list, dict), {})
-    rf_profiles = _load_artifact("wireless_rf_profiles.json", dict, {})
-    inventory_devices = _load_artifact("inventory_devices.json", list, [])
-    firmware_upgrades = _load_artifact("firmware_upgrades.json", list, [])
-    wireless_settings = _load_artifact("wireless_settings.json", dict, {})
-    wireless_ssids = _load_artifact("wireless_ssids.json", dict, {})
-    alerts_history = _load_artifact("alerts_history.json", dict, {})
-    wireless_mesh_statuses = _load_artifact("wireless_mesh_statuses.json", dict, {})
-    pricing_payload = _load_artifact("pricing.json", dict, {})
-    if not pricing_payload:
-        pricing_payload = load_json_checked(
-            os.path.join(BASE_DIR, "pricing.json"),
-            dict,
-            {},
-            _data_quality_warnings,
-        )
-
-    # switch_port_configs / statuses are {serial: [port, …]} dicts — flatten,
-    # injecting switchSerial so downstream code can reference the parent switch.
-    def _flatten_ports(raw: Any, label: str) -> List[Dict]:
-        if isinstance(raw, list):
-            return [p for p in raw if isinstance(p, dict)]
-        if not isinstance(raw, dict):
-            _data_quality_warnings.append(f"{label} could not be normalized into port records")
-            return []
-        result = []
-        for serial, ports in raw.items():
-            if isinstance(ports, list):
-                for p in ports:
-                    if isinstance(p, dict):
-                        p.setdefault("switchSerial", serial)
-                        result.append(p)
-        return result
-
-    switch_port_configs = _flatten_ports(switch_port_configs_by_switch, "switch_port_configs.json")
-    switch_port_statuses = _flatten_ports(switch_port_statuses_by_switch, "switch_port_statuses.json")
-    networks = _load_artifact("networks.json", list, [], required=True)
-    security_baseline = _load_artifact("security_baseline.json", dict, {}, required=True)
+    report_data = load_report_data(org_dir, BASE_DIR)
+    _data_quality_warnings = report_data.data_quality_warnings
+    rec_md = report_data.recommendations_markdown
+    inventory_summary = report_data.inventory_summary
+    poe_summary = report_data.poe_summary
+    channel_util = report_data.channel_utilization
+    devices_avail = report_data.devices_availability
+    lldp_cdp = report_data.lldp_cdp
+    wireless_stats = report_data.wireless_stats
+    wireless_clients = report_data.wireless_clients
+    switch_port_statuses_by_switch = report_data.switch_port_statuses_by_switch
+    switch_port_configs_by_switch = report_data.switch_port_configs_by_switch
+    switch_port_statuses = report_data.switch_port_statuses
+    switch_port_configs = report_data.switch_port_configs
+    uplink_statuses = report_data.uplink_statuses
+    appliance_uplinks_usage = report_data.appliance_uplinks_usage
+    devices_statuses_raw = report_data.devices_statuses
+    clients_overview_raw = report_data.clients_overview
+    licensing_data = report_data.licensing
+    rf_profiles = report_data.rf_profiles
+    inventory_devices = report_data.inventory_devices
+    firmware_upgrades = report_data.firmware_upgrades
+    wireless_settings = report_data.wireless_settings
+    wireless_ssids = report_data.wireless_ssids
+    alerts_history = report_data.alerts_history
+    wireless_mesh_statuses = report_data.wireless_mesh_statuses
+    pricing_payload = report_data.pricing
+    networks = report_data.networks
+    security_baseline = report_data.security_baseline
     inbound_firewall_rules_by_network = _load_inbound_firewall_rules(
         org_dir,
         networks,
