@@ -47,6 +47,7 @@ from .best_practices import build_best_practice_checks, render_best_practice_sec
 from .context import load_report_data
 from .html_shell import build_html, write_pdf
 from .revisions import ReportRevision, atomic_copy, fingerprint_inputs
+from .report_sections.licensing import build_licensing_section
 from .section_registry import render_report_sections, render_toc
 
 log = logging.getLogger(__name__)
@@ -2287,190 +2288,12 @@ def _build_org_report_variants(
     """
 
     # =========================================================
-    # SECTION 9: LICENSING SUMMARY
+    # SECTION 10: LICENSING SUMMARY
     # =========================================================
-    licensing_mode = (
-        licensing_data.get("licenseMode")
-        if isinstance(licensing_data, dict)
-        else None
+    licensing_html = build_licensing_section(
+        licensing_data,
+        artifact_available=os.path.isfile(os.path.join(org_dir, "licensing.json")),
     )
-    licensing_path = os.path.join(org_dir, "licensing.json")
-    coverage_total = 1
-    coverage_ok = int(
-        os.path.isfile(licensing_path)
-        and isinstance(licensing_data, dict)
-        and bool(licensing_data)
-        and not licensing_data.get("error")
-    )
-
-    # Build license rows — supports both co-term key lists and per-device status APIs.
-    # co-term: licenses is a list of {key, expired (bool), counts, editions, startedAt, duration}
-    # per-device: licenses is a list of {licenseType/productType, status (str), expirationDate, ...}
-    _lic_rows_html = ""
-    _raw_lic_list = (
-        licensing_data.get("licenses", [])
-        if isinstance(licensing_data, dict)
-        else []
-    )
-    for _lic in _raw_lic_list:
-        if not isinstance(_lic, dict):
-            continue
-        # Determine model / product from whichever fields are present
-        _counts = _lic.get("counts") or []  # co-term: [{"count": N, "model": "MR Enterprise"}]
-        _editions = _lic.get("editions") or []  # co-term: [{"edition": "Ent", "productType": "appliance"}]
-        if _counts:
-            _lic_type = ", ".join(
-                f"{c.get('count', '?')}× {c.get('model', '?')}"
-                for c in _counts if isinstance(c, dict)
-            )
-            if not _lic_type:
-                _lic_type = "—"
-        else:
-            _lic_type = _lic.get("licenseType") or _lic.get("productType") or "—"
-        # Status — co-term uses expired bool; per-device uses status string
-        _is_expired = (
-            _lic.get("expired") is True
-            or str(_lic.get("status", "")).lower() in ("expired", "inactive")
-        )
-        _is_invalidated = bool(_lic.get("invalidated"))
-        if _is_invalidated:
-            _status_str = "Invalidated"
-            _status_cls = "warning"
-        elif _is_expired:
-            _status_str = "Expired"
-            _status_cls = "fail"
-        else:
-            _status_str = _lic.get("status") or "Active"
-            _status_cls = "pass"
-        # Expiry date — co-term calculates from startedAt + duration (days); per-device has expirationDate
-        _exp_date = _lic.get("expirationDate") or _lic.get("expiration") or "—"
-        if _exp_date == "—" and _lic.get("startedAt") and _lic.get("duration"):
-            try:
-                _started = parse_datetime(_lic["startedAt"])
-                _duration = safe_int(_lic.get("duration"), None)
-                if _started is None or _duration is None:
-                    raise ValueError("invalid license timestamp or duration")
-                _exp_dt = _started + timedelta(days=_duration)
-                _exp_date = _exp_dt.strftime("%Y-%m-%d")
-            except Exception:
-                pass
-        _key = _he(_lic.get("key") or "—")
-        _lic_rows_html += (
-            f"<tr>"
-            f"<td><code style='font-size:9px'>{_key}</code></td>"
-            f"<td>{_he(_lic_type)}</td>"
-            f'<td><span class="check-{_status_cls}">{_status_str}</span></td>'
-            f"<td>{_he(str(_exp_date))}</td>"
-            f"</tr>"
-        )
-
-    _active_count = sum(
-        1 for _l in _raw_lic_list
-        if isinstance(_l, dict) and not _l.get("invalidated") and (
-            _l.get("expired") is False
-            or str(_l.get("status", "")).lower() in ("ok", "active", "in compliance")
-        )
-    )
-    _expired_count = sum(
-        1 for _l in _raw_lic_list
-        if isinstance(_l, dict) and (
-            _l.get("expired") is True
-            or str(_l.get("status", "")).lower() in ("expired", "inactive")
-        )
-    )
-    _total_lic = len(_raw_lic_list)
-
-    if isinstance(licensing_data, dict) and licensing_data.get("error"):
-        _lic_summary_note = (
-            "<strong>Licensing data unavailable</strong> — the API returned an error for this "
-            "organization. Verify that the API key has <em>read</em> access to the licensing "
-            "endpoints and re-run the backup pipeline."
-        )
-    elif licensing_mode:
-        _lic_summary_note = (
-            f"This organization uses the <strong>{_he(licensing_mode)}</strong> licensing model. "
-            f"Licensing is tracked at the organization level — {_total_lic} license key(s) on "
-            f"record: <strong>{_active_count} active</strong>, "
-            f"<strong class='{'text-crit' if _expired_count else ''}'>{_expired_count} expired</strong>. "
-            "Meraki co-term licenses do not map 1:1 to individual devices or networks; Dashboard "
-            "determines overall compliance from the combined pool of active seat counts."
-        )
-    else:
-        _lic_summary_note = (
-            "Licensing scope could not be determined from the collected payload. "
-            "This section should be treated as partial until the pipeline is validated against "
-            "the <code>/organizations/{id}/licenses/overview</code> endpoint."
-        )
-
-    if _lic_rows_html:
-        _licensing_table = f"""
-        <table class="data dense">
-          <thead>
-            <tr>
-              <th>License Key</th>
-              <th>Coverage (Model / Count)</th>
-              <th>Status</th>
-              <th>Expiration</th>
-            </tr>
-          </thead>
-          <tbody>{_lic_rows_html}</tbody>
-        </table>"""
-    elif licensing_data is not None:
-        # File was collected but the licenses array is empty (e.g. org uses a
-        # different licensing mode or has no keys assigned yet)
-        _licensing_table = """
-        <div class="summary-card">
-          <div class="summary-body">
-            No license keys were returned by the Meraki API for this organization.
-            If this organization uses <strong>per-device licensing</strong>, verify that
-            <code>GET /organizations/{id}/licenses</code> is returning data and that the
-            backup pipeline is storing it correctly. If the org is managed under an
-            Enterprise Agreement or co-term umbrella, licensing may be tracked at the
-            parent organization level.
-          </div>
-        </div>"""
-    else:
-        _licensing_table = """
-        <div class="summary-card">
-          <div class="summary-body">
-            No <code>licensing.json</code> was found in this backup. Ensure the backup
-            pipeline calls <code>GET /organizations/{id}/licenses</code> and stores the
-            result before generating reports.
-          </div>
-        </div>"""
-
-    licensing_html = f"""
-    <section id="licensing" class="report-section">
-      <h2>10. Licensing Summary</h2>
-      <p>Cisco Meraki devices require active cloud-managed licenses to maintain Dashboard
-         visibility and security feature enforcement. Expired licenses can cause devices to
-         enter limited mode. Review expirations and plan renewals at least 90 days in advance.</p>
-      <div class="summary-card">
-        <div class="summary-title">Licensing Status &amp; Scope</div>
-        <div class="summary-body">
-          {_lic_summary_note}
-          <br><br>
-          Org backup coverage: <strong>{coverage_ok}/{coverage_total}</strong> org(s) with
-          licensing data collected.
-        </div>
-      </div>
-      {_licensing_table}
-      <div class="summary-card">
-        <div class="summary-title">Licensing Best Practices</div>
-        <div class="summary-body">
-          <ul>
-            <li>Set Dashboard expiry alerts at 90, 60, and 30 days before license end</li>
-            <li>Confirm device count in Dashboard matches physical inventory to avoid
-                under-licensing surprises at renewal</li>
-            <li>Ensure Advanced Security (AMP, IDS/IPS) tier licenses are applied to all
-                MX appliances — base licenses do not include threat prevention features</li>
-            <li>Consider co-termination or EA consolidation to reduce renewal complexity
-                across multiple license key expiry dates</li>
-          </ul>
-        </div>
-      </div>
-    </section>
-    """
 
     # =========================================================
     # SECTION 15: CLIENT ANALYSIS
